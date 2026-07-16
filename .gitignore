@@ -1,0 +1,25 @@
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments and packaging output
+.venv/
+venv/
+dist/
+*.egg-info/
+
+# Generated solutions and local extraction caches
+/shenzhenio-tools/build/
+/shenzhenio-tools/data/raw/
+/shenzhenio-tools/.cache/
+/shenzhenio-tools/tools/.deps/
+
+# Temporary and backup files
+*.tmp
+*.bak
+*~

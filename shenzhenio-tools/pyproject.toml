@@ -1,0 +1,12 @@
+[project]
+name = "shzio"
+version = "0.1.0"
+description = "Python API and tooling for SHENZHEN I/O solution files"
+requires-python = ">=3.10"
+
+[project.scripts]
+shzio = "shzio.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
