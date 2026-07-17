@@ -592,6 +592,18 @@ def _parse_board_data(
             "tile_width": width,
             "tile_height": height,
             "tuple_width": tuple_width,
+            "tuple_semantics": {
+                "fields": [
+                    "texture_index",
+                    "quarter_turns_clockwise",
+                    "flip_flags",
+                ],
+                "flip_flag_bits": {
+                    "horizontal": 1,
+                    "vertical": 2,
+                },
+                "method_tokens": ["0x06000287", "0x06000260"],
+            },
             "data_sha256": data.get("sha256"),
             "cells": rows,
         }

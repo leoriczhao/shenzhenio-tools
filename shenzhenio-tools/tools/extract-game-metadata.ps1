@@ -37,7 +37,15 @@ param(
 
     [string]$MonoCecilPath = "",
 
-    [string[]]$ConsumerFieldTokens = @("0x04000A8E")
+    [string[]]$ConsumerFieldTokens = @("0x04000A8E"),
+
+    [string[]]$MethodTokens = @(),
+
+    [ValidateRange(0, 8)]
+    [int]$MethodDependencyDepth = 0,
+
+    [ValidateRange(1, 512)]
+    [int]$MethodDependencyLimit = 128
 )
 
 $ErrorActionPreference = "Stop"
@@ -1377,14 +1385,22 @@ try {
         if ($initializerMethods | Where-Object { $_.MetadataToken -eq $method.MetadataToken }) {
             continue
         }
+        $consumerBody = $null
+        $consumerError = $null
+        try {
+            $consumerBody = Get-MethodBodyDetails $method $opCodeMap
+        }
+        catch {
+            $consumerError = $_.Exception.Message
+        }
         $disassembly += [ordered]@{
             category = "field_consumer"
             consumed_field_tokens = $consumer.field_tokens
             type = $method.DeclaringType.FullName
             method = $method.Name
             metadata_token = Format-MetadataToken $method.MetadataToken
-            body = Get-MethodBodyDetails $method $opCodeMap
-            error = $null
+            body = $consumerBody
+            error = $consumerError
         }
         $consumerTypeName = $method.DeclaringType.FullName
         if (-not ($detailedTypes | Where-Object { $_.full_name -eq $consumerTypeName })) {
@@ -1394,6 +1410,93 @@ try {
 }
 catch {
     $fieldConsumerError = $_.Exception.Message
+}
+
+$targetMethods = @()
+$targetMethodErrors = @()
+foreach ($tokenText in $MethodTokens) {
+    try {
+        if ($tokenText -notmatch "^0x06[0-9A-Fa-f]{6}$") {
+            throw "method token must have the form 0x06NNNNNN"
+        }
+        $token = [System.Convert]::ToInt32($tokenText.Substring(2), 16)
+        $method = $module.ResolveMethod($token)
+        if ($method.Module.ModuleVersionId -ne $module.ModuleVersionId) {
+            throw "method belongs to another module"
+        }
+        if ($null -eq $method.GetMethodBody()) {
+            throw "method has no IL body"
+        }
+        $targetMethods += $method
+        if (-not ($disassembly | Where-Object { $_.metadata_token -eq $tokenText })) {
+            $disassembly += [ordered]@{
+                category = "target_method"
+                type = $method.DeclaringType.FullName
+                method = $method.Name
+                metadata_token = Format-MetadataToken $method.MetadataToken
+                body = Get-MethodBodyDetails $method $opCodeMap
+                error = $null
+            }
+        }
+        $targetTypeName = $method.DeclaringType.FullName
+        if (-not ($detailedTypes | Where-Object { $_.full_name -eq $targetTypeName })) {
+            try {
+                $detailedTypes += Get-TypeDetails $method.DeclaringType
+            }
+            catch {
+                $targetMethodErrors += [ordered]@{
+                    metadata_token = Format-MetadataToken $method.MetadataToken
+                    error = "type details: $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+    catch {
+        $targetMethodErrors += [ordered]@{
+            metadata_token = $tokenText
+            error = $_.Exception.Message
+        }
+    }
+}
+
+$targetMethodDependencies = @()
+if ($targetMethods.Count -gt 0 -and $MethodDependencyDepth -gt 0) {
+    $targetMethodDependencies = @(
+        Get-ModuleMethodDependencies `
+            $targetMethods `
+            $module `
+            $opCodeMap `
+            $MethodDependencyDepth `
+            $MethodDependencyLimit
+    )
+    foreach ($dependency in $targetMethodDependencies) {
+        $method = $dependency.method
+        $methodToken = Format-MetadataToken $method.MetadataToken
+        if (-not ($disassembly | Where-Object { $_.metadata_token -eq $methodToken })) {
+            $disassembly += [ordered]@{
+                category = "target_method_dependency"
+                dependency_depth = $dependency.depth
+                referenced_by = $dependency.referenced_by
+                type = $method.DeclaringType.FullName
+                method = $method.Name
+                metadata_token = $methodToken
+                body = Get-MethodBodyDetails $method $opCodeMap
+                error = $null
+            }
+        }
+        $dependencyTypeName = $method.DeclaringType.FullName
+        if (-not ($detailedTypes | Where-Object { $_.full_name -eq $dependencyTypeName })) {
+            try {
+                $detailedTypes += Get-TypeDetails $method.DeclaringType
+            }
+            catch {
+                $targetMethodErrors += [ordered]@{
+                    metadata_token = Format-MetadataToken $method.MetadataToken
+                    error = "dependency type details: $($_.Exception.Message)"
+                }
+            }
+        }
+    }
 }
 
 $chipTypesType = Find-TypeByName $allTypes "ChipTypes"
@@ -1444,6 +1547,11 @@ $payload = [ordered]@{
         initialized_data_error = $initializedDataError
         field_consumer_count = @($disassembly | Where-Object { $_.category -eq "field_consumer" }).Count
         field_consumer_error = $fieldConsumerError
+        target_method_count = $targetMethods.Count
+        target_method_dependency_count = $targetMethodDependencies.Count
+        target_method_dependency_depth = $MethodDependencyDepth
+        target_method_dependency_limit = $MethodDependencyLimit
+        target_method_errors = $targetMethodErrors
         missing_disassembly_types = $missingDisassemblyTypes
     }
     type_names = @($allTypes | ForEach-Object { $_.FullName } | Sort-Object)

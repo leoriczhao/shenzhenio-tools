@@ -1,0 +1,277 @@
+from __future__ import annotations
+
+from collections import deque
+from dataclasses import dataclass
+from itertools import islice, permutations
+from typing import Iterable
+
+from .boards import Board
+from .model import Net, Part, PinRef
+from .physical import endpoint_for_pin_ref, endpoints_for_design
+from .traces import DOWN, EXISTS, LEFT, RIGHT, UP, TraceGrid
+
+
+CARDINAL_STEPS = (
+    (-1, 0, LEFT, RIGHT),
+    (1, 0, RIGHT, LEFT),
+    (0, -1, DOWN, UP),
+    (0, 1, UP, DOWN),
+)
+
+
+class RoutingError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class RoutedNet:
+    pins: tuple[PinRef, ...]
+    cells: frozenset[tuple[int, int]]
+
+
+@dataclass(frozen=True)
+class RoutingResult:
+    traces: TraceGrid
+    nets: tuple[RoutedNet, ...]
+
+
+@dataclass
+class _LogicalNet:
+    pins: list[PinRef]
+    source_index: int
+
+
+class DeterministicRouter:
+    def __init__(self, max_order_attempts: int = 720) -> None:
+        if max_order_attempts < 1:
+            raise ValueError("max_order_attempts must be positive")
+        self.max_order_attempts = max_order_attempts
+
+    def route(self, board: Board, parts: list[Part], nets: list[Net]) -> RoutingResult:
+        if not nets:
+            return RoutingResult(
+                TraceGrid.blank(board.width, board.height),
+                (),
+            )
+        if not board.routable_cells:
+            raise RoutingError(f"board {board.puzzle_id} has no routable-cell model")
+
+        logical_nets = _logical_nets(nets)
+        contacts = {
+            (endpoint.x, endpoint.y)
+            for endpoint in endpoints_for_design(board, parts)
+        }
+        last_error: RoutingError | None = None
+        for order in _route_orders(logical_nets, self.max_order_attempts):
+            try:
+                return self._route_in_order(board, order, contacts)
+            except RoutingError as exc:
+                last_error = exc
+        assert last_error is not None
+        raise RoutingError(
+            f"could not route {len(logical_nets)} logical nets on {board.puzzle_id}: "
+            f"{last_error}"
+        ) from last_error
+
+    def _route_in_order(
+        self,
+        board: Board,
+        logical_nets: tuple[_LogicalNet, ...],
+        contacts: set[tuple[int, int]],
+    ) -> RoutingResult:
+        masks: dict[tuple[int, int], int] = {}
+        occupied: set[tuple[int, int]] = set()
+        routed: dict[int, RoutedNet] = {}
+
+        for logical_net in logical_nets:
+            endpoint_cells = tuple(_pin_coordinate(pin) for pin in logical_net.pins)
+            unique_endpoints = tuple(dict.fromkeys(endpoint_cells))
+            for cell in unique_endpoints:
+                if cell not in board.routable_cells:
+                    raise RoutingError(
+                        f"endpoint {_pin_labels(logical_net.pins)} at {cell} is not routable"
+                    )
+
+            tree = {unique_endpoints[0]}
+            edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+            blocked_contacts = contacts - set(unique_endpoints)
+            for endpoint in unique_endpoints[1:]:
+                path = _lee_path(
+                    start=endpoint,
+                    targets=tree,
+                    allowed=board.routable_cells,
+                    blocked=occupied | blocked_contacts,
+                )
+                for a, b in zip(path, path[1:]):
+                    edges.add((a, b))
+                tree.update(path)
+
+            if tree & occupied:
+                raise RoutingError(
+                    f"net {_pin_labels(logical_net.pins)} intersects an earlier net"
+                )
+            occupied.update(tree)
+            for cell in tree:
+                masks[cell] = masks.get(cell, 0) | EXISTS
+            for a, b in edges:
+                _connect_masks(masks, a, b)
+            routed[logical_net.source_index] = RoutedNet(
+                tuple(logical_net.pins), frozenset(tree)
+            )
+
+        return RoutingResult(
+            traces=TraceGrid.from_masks(board.width, board.height, masks),
+            nets=tuple(routed[index] for index in sorted(routed)),
+        )
+
+
+def route_nets(board: Board, parts: list[Part], nets: list[Net]) -> RoutingResult:
+    return DeterministicRouter().route(board, parts, nets)
+
+
+def _logical_nets(nets: list[Net]) -> list[_LogicalNet]:
+    parent: dict[tuple[int, str], tuple[int, str]] = {}
+    pins: dict[tuple[int, str], PinRef] = {}
+    first_seen: dict[tuple[int, str], int] = {}
+
+    def key(pin: PinRef) -> tuple[int, str]:
+        return id(pin.owner), pin.name
+
+    def find(item: tuple[int, str]) -> tuple[int, str]:
+        parent.setdefault(item, item)
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    def union(a: tuple[int, str], b: tuple[int, str]) -> None:
+        root_a = find(a)
+        root_b = find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    for index, net in enumerate(nets):
+        a = key(net.a)
+        b = key(net.b)
+        pins.setdefault(a, net.a)
+        pins.setdefault(b, net.b)
+        first_seen.setdefault(a, index)
+        first_seen.setdefault(b, index)
+        union(a, b)
+
+    grouped: dict[tuple[int, str], list[tuple[int, str]]] = {}
+    for item in pins:
+        grouped.setdefault(find(item), []).append(item)
+
+    logical_nets = [
+        _LogicalNet(
+            pins=[pins[item] for item in sorted(items, key=first_seen.__getitem__)],
+            source_index=min(first_seen[item] for item in items),
+        )
+        for items in grouped.values()
+    ]
+    logical_nets.sort(key=lambda item: item.source_index)
+    return logical_nets
+
+
+def _route_orders(
+    logical_nets: list[_LogicalNet], max_attempts: int
+) -> Iterable[tuple[_LogicalNet, ...]]:
+    if len(logical_nets) <= 1:
+        yield tuple(logical_nets)
+        return
+
+    seen: set[tuple[int, ...]] = set()
+    emitted = 0
+
+    def emit(order: tuple[_LogicalNet, ...]) -> tuple[_LogicalNet, ...] | None:
+        nonlocal emitted
+        key = tuple(item.source_index for item in order)
+        if key in seen or emitted >= max_attempts:
+            return None
+        seen.add(key)
+        emitted += 1
+        return order
+
+    base = tuple(logical_nets)
+    for reverse in (False, True):
+        candidate = tuple(reversed(base)) if reverse else base
+        for shift in range(len(candidate)):
+            order = candidate[shift:] + candidate[:shift]
+            result = emit(order)
+            if result is not None:
+                yield result
+
+    if emitted >= max_attempts:
+        return
+    for order in islice(permutations(logical_nets), max_attempts):
+        result = emit(order)
+        if result is not None:
+            yield result
+        if emitted >= max_attempts:
+            return
+
+
+def _lee_path(
+    start: tuple[int, int],
+    targets: set[tuple[int, int]],
+    allowed: frozenset[tuple[int, int]],
+    blocked: set[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    if start in targets:
+        return [start]
+    queue = deque([start])
+    parent: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+
+    while queue:
+        current = queue.popleft()
+        cx, cy = current
+        for dx, dy, _, _ in CARDINAL_STEPS:
+            neighbor = cx + dx, cy + dy
+            if neighbor in parent or neighbor not in allowed:
+                continue
+            if neighbor in blocked and neighbor not in targets:
+                continue
+            parent[neighbor] = current
+            if neighbor in targets:
+                return _reconstruct_path(parent, neighbor)
+            queue.append(neighbor)
+
+    raise RoutingError(f"no legal trace path from {start} to the existing net tree")
+
+
+def _reconstruct_path(
+    parent: dict[tuple[int, int], tuple[int, int] | None],
+    end: tuple[int, int],
+) -> list[tuple[int, int]]:
+    path = [end]
+    while parent[path[-1]] is not None:
+        path.append(parent[path[-1]])
+    path.reverse()
+    return path
+
+
+def _connect_masks(
+    masks: dict[tuple[int, int], int],
+    a: tuple[int, int],
+    b: tuple[int, int],
+) -> None:
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    for step_x, step_y, forward, backward in CARDINAL_STEPS:
+        if (dx, dy) == (step_x, step_y):
+            masks[a] = masks.get(a, EXISTS) | EXISTS | forward
+            masks[b] = masks.get(b, EXISTS) | EXISTS | backward
+            return
+    raise RoutingError(f"trace edge {a} -> {b} is not cardinal and adjacent")
+
+
+def _pin_coordinate(pin: PinRef) -> tuple[int, int]:
+    endpoint = endpoint_for_pin_ref(pin)
+    if endpoint is None:
+        raise RoutingError(f"pin {pin.owner.name}.{pin.name} has no physical contact")
+    return endpoint.x, endpoint.y
+
+
+def _pin_labels(pins: Iterable[PinRef]) -> str:
+    return ", ".join(f"{pin.owner.name}.{pin.name}" for pin in pins)

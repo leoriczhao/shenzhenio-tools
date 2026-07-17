@@ -41,6 +41,21 @@ def compare_board_to_puzzle(board: Board, puzzle: dict[str, Any]) -> dict[str, A
     )
     model_types = sorted(part.type_name for part in board.fixed_parts)
     _compare(checks, "provided_chip_types", extracted_types, model_types)
+    _compare(
+        checks,
+        "provided_chip_positions",
+        [chip.get("position_raw") for chip in puzzle.get("provided_chips", [])],
+        [[part.x, part.y] for part in board.fixed_parts],
+    )
+    _compare(
+        checks,
+        "provided_chip_rotations",
+        [
+            bool(chip.get("boolean_fields", {}).get("0x0400087D", False))
+            for chip in puzzle.get("provided_chips", [])
+        ],
+        [part.rotated for part in board.fixed_parts],
+    )
 
     bound_terminal_names = {
         link.get("terminal_name")
@@ -83,21 +98,16 @@ def compare_board_to_puzzle(board: Board, puzzle: dict[str, Any]) -> dict[str, A
             or bool(terminal.get("nonblocking_flag")),
             port.nonblocking,
         )
-
-    _unresolved(
-        checks,
-        "provided_chip_positions",
-        "Puzzle positions are raw board origins; the solution-coordinate transform is not decoded.",
-    )
-    _unresolved(
-        checks,
-        "terminal_contact_positions",
-        "Terminal positions are component origins, not electrical contact cells.",
-    )
+        _compare(
+            checks,
+            f"port.{name}.contact",
+            terminal.get("position_raw"),
+            [port.x, port.y],
+        )
     _unresolved(
         checks,
         "board_tiles_and_trace_grid",
-        "Raw board-cell triples are decoded, but their tile semantics and solution trace layer are separate.",
+        "Board tile semantics are decoded, but the hand-written Board does not model its tile layer.",
     )
 
     counts = {

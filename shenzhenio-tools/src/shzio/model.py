@@ -30,9 +30,12 @@ class PinSpec:
     kind: PinKind
     side: Side
     offset: int
+    index: int | None = None
     direction: PinDirection = PinDirection.BIDIRECTIONAL
     contact_dx: int | None = None
     contact_dy: int | None = None
+    rotated_contact_dx: int | None = None
+    rotated_contact_dy: int | None = None
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .board_catalog import BoardCatalogError, write_board_catalog
 from .board_compare import compare_board_to_puzzle
 from .boards import BOARD_CLASSES, board_from_id
 from .checker import check_solution
@@ -96,6 +97,14 @@ def main(argv: list[str] | None = None) -> int:
     p_extract_puzzles.add_argument("--chips", help="extracted chip catalog JSON path")
     p_extract_puzzles.add_argument("--output", help="output JSON path")
 
+    p_extract_boards = sub.add_parser(
+        "extract-board-catalog",
+        help="normalize puzzle boards, terminals, provided parts, and contacts",
+    )
+    p_extract_boards.add_argument("--puzzles", help="extracted puzzle catalog JSON path")
+    p_extract_boards.add_argument("--chips", help="extracted chip catalog JSON path")
+    p_extract_boards.add_argument("--output", help="output JSON path")
+
     p_compare_board = sub.add_parser(
         "compare-board-catalog",
         help="compare a hand-written BoardSpec with the extracted puzzle catalog",
@@ -151,6 +160,12 @@ def main(argv: list[str] | None = None) -> int:
         return _extract_puzzle_catalog(
             Path(args.metadata) if args.metadata else None,
             Path(args.strings) if args.strings else None,
+            Path(args.chips) if args.chips else None,
+            Path(args.output) if args.output else None,
+        )
+    if args.command == "extract-board-catalog":
+        return _extract_board_catalog(
+            Path(args.puzzles) if args.puzzles else None,
             Path(args.chips) if args.chips else None,
             Path(args.output) if args.output else None,
         )
@@ -267,10 +282,15 @@ def _parts_info() -> int:
                 "pins": {
                     name: {
                         "kind": pin.kind.value,
+                        "index": pin.index,
                         "side": pin.side.value,
                         "offset": pin.offset,
                         "direction": pin.direction.value,
                         "contact": [pin.contact_dx, pin.contact_dy],
+                        "rotated_contact": [
+                            pin.rotated_contact_dx,
+                            pin.rotated_contact_dy,
+                        ],
                     }
                     for name, pin in spec.pins.items()
                 },
@@ -473,6 +493,34 @@ def _extract_puzzle_catalog(
     print(f"provided chips: {summary['provided_chip_count']}")
     print(f"initial traces: {summary['initial_trace_count']}")
     print(f"decoded boards: {summary['decoded_board_count']}")
+    return 0
+
+
+def _extract_board_catalog(
+    puzzles: Path | None,
+    chips: Path | None,
+    output: Path | None,
+) -> int:
+    try:
+        kwargs = {}
+        if puzzles is not None:
+            kwargs["puzzles_path"] = puzzles
+        if chips is not None:
+            kwargs["chips_path"] = chips
+        if output is not None:
+            kwargs["output"] = output
+        output_path, payload = write_board_catalog(**kwargs)
+    except BoardCatalogError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    summary = payload["summary"]
+    print(output_path)
+    print(f"boards: {summary['board_count']}")
+    print(f"tiles: {summary['tile_count']}")
+    print(f"terminals: {summary['terminal_count']}")
+    print(f"provided parts: {summary['provided_part_count']}")
+    print(f"unresolved contacts: {summary['unresolved_contact_count']}")
     return 0
 
 

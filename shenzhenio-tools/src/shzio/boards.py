@@ -14,6 +14,9 @@ class Board:
     height: int = 14
     fixed_parts: list[Part] = field(default_factory=list)
     ports: dict[str, BoardPort] = field(default_factory=dict)
+    placement_origin: tuple[int, int] = (1, 1)
+    placement_size: tuple[int, int] = (20, 12)
+    routable_cells: frozenset[tuple[int, int]] = field(default_factory=frozenset)
     traces: TraceGrid | None = None
 
     def __post_init__(self) -> None:
@@ -26,12 +29,31 @@ class Board:
         except KeyError as exc:
             raise AttributeError(f"board {self.puzzle_id} has no port {name!r}") from exc
 
+    def is_routable(self, position: tuple[int, int]) -> bool:
+        return position in self.routable_cells
+
+    def contains_footprint(
+        self, position: tuple[int, int], size: tuple[int, int]
+    ) -> bool:
+        x, y = position
+        width, height = size
+        origin_x, origin_y = self.placement_origin
+        placement_width, placement_height = self.placement_size
+        return (
+            width >= 0
+            and height >= 0
+            and x >= origin_x
+            and y >= origin_y
+            and x + width <= origin_x + placement_width
+            and y + height <= origin_y + placement_height
+        )
+
 
 class Sz035(Board):
     def __init__(self) -> None:
         radio = Radio("radio")
-        radio.x = 7
-        radio.y = 5
+        radio.x = 6
+        radio.y = 4
         radio.provided = True
 
         super().__init__(
@@ -44,27 +66,12 @@ class Sz035(Board):
                     kind=PinKind.SIMPLE,
                     direction=PinDirection.INPUT,
                     x=15,
-                    y=8,
-                    label="蜂音器",
+                    y=5,
+                    label="蜂鸣器",
                 )
             },
-            traces=TraceGrid(
-                [
-                    "......................",
-                    "......................",
-                    "......................",
-                    "......................",
-                    "......................",
-                    "......................",
-                    "........1C............",
-                    ".........354.15C......",
-                    "...............2......",
-                    "......................",
-                    "......................",
-                    "......................",
-                    "......................",
-                    "......................",
-                ]
+            routable_cells=frozenset(
+                (x, y) for y in range(3, 8) for x in range(6, 16)
             ),
         )
         self.radio = radio

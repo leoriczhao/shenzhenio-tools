@@ -29,6 +29,7 @@ class ChipCatalogProfile:
     pin_kind_field: str = "0x040008C1"
     pin_label_field: str = "0x040008C2"
     pin_register_field: str = "0x040008C3"
+    single_pin_at_origin_field: str = "0x040008BF"
 
 
 DEFAULT_PROFILE = ChipCatalogProfile()
@@ -80,6 +81,11 @@ def build_chip_catalog(
     chips = []
     for raw in raw_chips:
         width, height = raw["size"]
+        single_pin_at_origin = any(
+            field["field_token"] == profile.single_pin_at_origin_field
+            and field["value"] != 0
+            for field in raw["scalar_fields"]
+        )
         pin_indexes = sorted(
             set(raw["pin_kinds"]) | set(raw["pin_labels"]) | set(raw["pin_registers"])
         )
@@ -100,6 +106,20 @@ def build_chip_catalog(
                 name = f"{prefix}{sequence}"
                 name_source = "generated"
             side, side_offset = _pin_slot(index, height)
+            contact_offset = _pin_contact_offset(
+                index,
+                width,
+                height,
+                rotated=False,
+                single_pin_at_origin=single_pin_at_origin,
+            )
+            rotated_contact_offset = _pin_contact_offset(
+                index,
+                width,
+                height,
+                rotated=True,
+                single_pin_at_origin=single_pin_at_origin,
+            )
             pins.append(
                 {
                     "index": index,
@@ -112,6 +132,8 @@ def build_chip_catalog(
                     "register_value": register_value,
                     "side": side,
                     "side_offset": side_offset,
+                    "contact_offset": list(contact_offset),
+                    "rotated_contact_offset": list(rotated_contact_offset),
                     "direction": "unknown",
                 }
             )
@@ -149,6 +171,13 @@ def build_chip_catalog(
             "strings_format": strings.get("format"),
         },
         "pin_kind_values": {str(key): value for key, value in sorted(pin_kind_names.items())},
+        "pin_contact_model": {
+            "coordinate_space": "solution-canvas",
+            "chip_position": "top-left-origin-stored-without-transform",
+            "rotation": "180-degrees",
+            "method_tokens": ["0x06000943", "0x06000B8C"],
+            "single_pin_at_origin_field": profile.single_pin_at_origin_field,
+        },
         "summary": {
             "chip_count": len(chips),
             "named_chip_count": sum(chip["name"] is not None for chip in chips),
@@ -571,6 +600,33 @@ def _pin_slot(index: int, height: int) -> tuple[str, int]:
     if index < height * 2:
         return "right", height * 2 - 1 - index
     return "unknown", index
+
+
+def _pin_contact_offset(
+    index: int,
+    width: int,
+    height: int,
+    *,
+    rotated: bool,
+    single_pin_at_origin: bool,
+) -> tuple[int, int]:
+    if single_pin_at_origin:
+        if index != 0:
+            raise ChipCatalogError(
+                f"single-pin-at-origin chip contains unexpected pin index {index}"
+            )
+        return 0, 0
+    if index < 0 or index >= height * 2:
+        raise ChipCatalogError(
+            f"pin index {index} is outside the two vertical edges of a {width}x{height} chip"
+        )
+    if not rotated:
+        if index < height:
+            return 0, height - 1 - index
+        return width - 1, index - height
+    if index < height:
+        return width - 1, index
+    return 0, height - 1 - (index - height)
 
 
 def _apply_manual_spec(chip: dict[str, Any], spec: ManualPartSpec) -> None:

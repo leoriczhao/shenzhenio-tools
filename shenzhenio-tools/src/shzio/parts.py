@@ -6,20 +6,34 @@ from .model import Part, PartSpec, PinDirection, PinKind, PinSpec, Side
 def _pin(
     name: str,
     kind: PinKind,
-    side: Side,
-    offset: int,
+    index: int,
+    width: int,
+    height: int,
     direction: PinDirection = PinDirection.BIDIRECTIONAL,
-    contact_dx: int | None = None,
-    contact_dy: int | None = None,
 ) -> PinSpec:
+    if index < 0 or index >= height * 2:
+        raise ValueError(f"pin index {index} is invalid for a {width}x{height} part")
+    if index < height:
+        side = Side.LEFT
+        offset = index
+        contact = (0, height - 1 - index)
+        rotated_contact = (width - 1, index)
+    else:
+        side = Side.RIGHT
+        offset = height * 2 - 1 - index
+        contact = (width - 1, index - height)
+        rotated_contact = (0, height - 1 - (index - height))
     return PinSpec(
         name=name,
         kind=kind,
         side=side,
         offset=offset,
+        index=index,
         direction=direction,
-        contact_dx=contact_dx,
-        contact_dy=contact_dy,
+        contact_dx=contact[0],
+        contact_dy=contact[1],
+        rotated_contact_dx=rotated_contact[0],
+        rotated_contact_dy=rotated_contact[1],
     )
 
 
@@ -31,10 +45,10 @@ MC4000_SPEC = PartSpec(
     max_code_lines=9,
     registers=("acc",),
     pins={
-        "x0": _pin("x0", PinKind.XBUS, Side.LEFT, 0, contact_dx=0, contact_dy=2),
-        "p0": _pin("p0", PinKind.SIMPLE, Side.LEFT, 1, contact_dx=0, contact_dy=3),
-        "p1": _pin("p1", PinKind.SIMPLE, Side.RIGHT, 0, contact_dx=2, contact_dy=2),
-        "x1": _pin("x1", PinKind.XBUS, Side.RIGHT, 1, contact_dx=2, contact_dy=3),
+        "x0": _pin("x0", PinKind.XBUS, 0, 3, 2),
+        "p0": _pin("p0", PinKind.SIMPLE, 1, 3, 2),
+        "x1": _pin("x1", PinKind.XBUS, 2, 3, 2),
+        "p1": _pin("p1", PinKind.SIMPLE, 3, 3, 2),
     },
 )
 
@@ -46,12 +60,12 @@ MC6000_SPEC = PartSpec(
     max_code_lines=14,
     registers=("acc", "dat"),
     pins={
-        "x0": _pin("x0", PinKind.XBUS, Side.LEFT, 0, contact_dx=0, contact_dy=2),
-        "x1": _pin("x1", PinKind.XBUS, Side.LEFT, 1, contact_dx=0, contact_dy=3),
-        "p0": _pin("p0", PinKind.SIMPLE, Side.LEFT, 2, contact_dx=0, contact_dy=4),
-        "p1": _pin("p1", PinKind.SIMPLE, Side.RIGHT, 0, contact_dx=2, contact_dy=2),
-        "x3": _pin("x3", PinKind.XBUS, Side.RIGHT, 1, contact_dx=2, contact_dy=3),
-        "x2": _pin("x2", PinKind.XBUS, Side.RIGHT, 2, contact_dx=2, contact_dy=4),
+        "x0": _pin("x0", PinKind.XBUS, 0, 3, 3),
+        "x1": _pin("x1", PinKind.XBUS, 1, 3, 3),
+        "p0": _pin("p0", PinKind.SIMPLE, 2, 3, 3),
+        "x2": _pin("x2", PinKind.XBUS, 3, 3, 3),
+        "x3": _pin("x3", PinKind.XBUS, 4, 3, 3),
+        "p1": _pin("p1", PinKind.SIMPLE, 5, 3, 3),
     },
 )
 
@@ -63,8 +77,8 @@ RADIO_SPEC = PartSpec(
     max_code_lines=None,
     registers=(),
     pins={
-        "rx": _pin("rx", PinKind.XBUS, Side.RIGHT, 0, PinDirection.OUTPUT, contact_dx=1, contact_dy=1),
-        "tx": _pin("tx", PinKind.XBUS, Side.RIGHT, 1, PinDirection.INPUT, contact_dx=1, contact_dy=2),
+        "tx": _pin("tx", PinKind.XBUS, 2, 3, 2, PinDirection.INPUT),
+        "rx": _pin("rx", PinKind.XBUS, 3, 3, 2, PinDirection.OUTPUT),
     },
 )
 

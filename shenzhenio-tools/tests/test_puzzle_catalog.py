@@ -229,6 +229,14 @@ class PuzzleCatalogTests(unittest.TestCase):
             puzzle["board_data"]["tuple_width"],
         ])
         self.assertEqual([-1, 0, 0], puzzle["board_data"]["cells"][0][0])
+        self.assertEqual(
+            ["texture_index", "quarter_turns_clockwise", "flip_flags"],
+            puzzle["board_data"]["tuple_semantics"]["fields"],
+        )
+        self.assertEqual(
+            {"horizontal": 1, "vertical": 2},
+            puzzle["board_data"]["tuple_semantics"]["flip_flag_bits"],
+        )
 
 
 if __name__ == "__main__":

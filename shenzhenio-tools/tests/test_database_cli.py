@@ -31,8 +31,8 @@ class DatabaseCliTests(unittest.TestCase):
         payload = run_cli("boards-info")
         board = next(item for item in payload if item["puzzle_id"] == "Sz035")
         self.assertEqual(board["fixed_parts"][0]["type"], "RADIO")
-        self.assertEqual(board["fixed_parts"][0]["position"], [7, 5])
-        self.assertEqual(board["ports"]["buzzer"]["position"], [15, 8])
+        self.assertEqual(board["fixed_parts"][0]["position"], [6, 4])
+        self.assertEqual(board["ports"]["buzzer"]["position"], [15, 5])
 
     def test_scan_saves_extracts_provided_parts(self) -> None:
         text = """[name] demo

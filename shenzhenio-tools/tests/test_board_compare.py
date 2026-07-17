@@ -20,18 +20,22 @@ def extracted_sz035(chip_type: str = "RADIO") -> dict:
                 "name": "radio-rx",
                 "type": "NonBlockingXBus",
                 "direction": "Input",
+                "position_raw": [0, 0],
                 "nonblocking_flag": False,
             },
             {
                 "name": "buzzer",
                 "type": "Analog",
                 "direction": "Output",
+                "position_raw": [15, 5],
                 "nonblocking_flag": False,
             },
         ],
         "provided_chips": [
             {
                 "chip_type": chip_type,
+                "position_raw": [6, 4],
+                "boolean_fields": {"0x0400087D": False},
                 "terminal_pin_links": [
                     {"terminal_name": "radio-rx", "pin_index": 3}
                 ],
@@ -41,13 +45,13 @@ def extracted_sz035(chip_type: str = "RADIO") -> dict:
 
 
 class BoardCompareTests(unittest.TestCase):
-    def test_sz035_verified_structure_matches_and_geometry_stays_unresolved(self) -> None:
+    def test_sz035_verified_structure_and_geometry_match(self) -> None:
         result = compare_board_to_puzzle(Sz035(), extracted_sz035())
 
         self.assertEqual("partial-match", result["status"])
         self.assertEqual(0, result["summary"]["mismatch"])
-        self.assertEqual(3, result["summary"]["unresolved"])
-        self.assertGreaterEqual(result["summary"]["match"], 6)
+        self.assertEqual(1, result["summary"]["unresolved"])
+        self.assertGreaterEqual(result["summary"]["match"], 9)
 
     def test_provided_chip_type_mismatch_is_reported(self) -> None:
         result = compare_board_to_puzzle(Sz035(), extracted_sz035("RTC"))

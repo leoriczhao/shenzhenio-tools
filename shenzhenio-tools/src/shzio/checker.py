@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from .api import Solution
 from .model import Part, PinKind
-from .physical import analyze_physical_nets, find_net_for_pin
+from .physical import DIRS, analyze_physical_nets, find_net_for_pin
 
 PIN_TOKEN_RE = re.compile(r"\b([px][0-3])\b")
 
@@ -24,6 +24,7 @@ def check_solution(solution: Solution) -> list[Diagnostic]:
     diagnostics.extend(_check_nets(solution))
     diagnostics.extend(_check_parts(solution))
     diagnostics.extend(_check_programs(solution))
+    diagnostics.extend(_check_traces(solution))
     diagnostics.extend(_check_physical_nets(solution))
     return diagnostics
 
@@ -46,19 +47,42 @@ def _check_parts(solution: Solution) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     all_parts = [*solution.parts, *solution.board.fixed_parts]
     occupied: dict[tuple[int, int], Part] = {}
+    min_x, min_y = solution.board.placement_origin
+    placement_width, placement_height = solution.board.placement_size
+    max_x = min_x + placement_width
+    max_y = min_y + placement_height
     for part in all_parts:
         if part.x is None or part.y is None:
             diagnostics.append(Diagnostic("error", f"part {part.name} has no placement"))
             continue
-        if part.x < 0 or part.y < 0:
-            diagnostics.append(Diagnostic("error", f"part {part.name} has negative placement ({part.x}, {part.y})"))
+        if not solution.board.contains_footprint(
+            (part.x, part.y), (part.spec.width, part.spec.height)
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    "error",
+                    f"part {part.name} footprint at ({part.x}, {part.y}) is outside "
+                    f"placement range ({min_x}, {min_y})..({max_x}, {max_y})",
+                )
+            )
         for dx in range(part.spec.width):
             for dy in range(part.spec.height):
                 pos = (part.x + dx, part.y + dy)
-                if pos in occupied:
+                if pos in occupied and not _bridge_terminal_overlap_allowed(
+                    part, occupied[pos]
+                ):
                     diagnostics.append(Diagnostic("error", f"part {part.name} overlaps {occupied[pos].name} at {pos}"))
                 occupied[pos] = part
     return diagnostics
+
+
+def _bridge_terminal_overlap_allowed(a: Part, b: Part) -> bool:
+    bridge, terminal = (a, b) if a.type_name == "BRIDGE" else (b, a)
+    if bridge.type_name != "BRIDGE" or terminal.type_name != "TERMINAL":
+        return False
+    if bridge.x is None or bridge.y is None or terminal.x is None or terminal.y is None:
+        return False
+    return (terminal.x, terminal.y) == (bridge.x, bridge.y + 1)
 
 
 def _check_programs(solution: Solution) -> list[Diagnostic]:
@@ -84,6 +108,39 @@ def _check_programs(solution: Solution) -> list[Diagnostic]:
                     diagnostics.append(Diagnostic("error", f"{part.name}.{pin_name} is not a simple pin"))
                 if pin_name.startswith("x") and part.spec.pins[pin_name].kind != PinKind.XBUS:
                     diagnostics.append(Diagnostic("error", f"{part.name}.{pin_name} is not an XBus pin"))
+    return diagnostics
+
+
+def _check_traces(solution: Solution) -> list[Diagnostic]:
+    grid = solution.board.traces
+    if grid is None:
+        return [Diagnostic("error", "board has no trace grid")]
+
+    diagnostics: list[Diagnostic] = []
+    reported_edges: set[tuple[tuple[int, int], int]] = set()
+    for (x, y), mask in grid.nonempty_cells().items():
+        if solution.board.routable_cells and (x, y) not in solution.board.routable_cells:
+            diagnostics.append(
+                Diagnostic("error", f"trace at ({x}, {y}) is outside the routable board area")
+            )
+        for bit, (dx, dy, opposite) in DIRS.items():
+            if not (mask & bit) or ((x, y), bit) in reported_edges:
+                continue
+            nx, ny = x + dx, y + dy
+            reported_edges.add(((x, y), bit))
+            reported_edges.add(((nx, ny), opposite))
+            if nx < 0 or ny < 0 or nx >= grid.width or ny >= grid.height:
+                diagnostics.append(
+                    Diagnostic("error", f"trace at ({x}, {y}) points outside the canvas")
+                )
+                continue
+            if not (grid.mask_at(nx, ny) & opposite):
+                diagnostics.append(
+                    Diagnostic(
+                        "error",
+                        f"trace edge ({x}, {y}) -> ({nx}, {ny}) has no reciprocal direction bit",
+                    )
+                )
     return diagnostics
 
 

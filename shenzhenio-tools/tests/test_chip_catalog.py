@@ -135,6 +135,18 @@ class ChipCatalogTests(unittest.TestCase):
         )
         self.assertTrue(all(pin["direction"] == "bidirectional" for pin in chip["pins"]))
         self.assertTrue(all(pin["official_name"] == pin["name"] for pin in chip["pins"]))
+        self.assertEqual(
+            [[0, 1], [0, 0], [2, 0], [2, 1]],
+            [pin["contact_offset"] for pin in chip["pins"]],
+        )
+        self.assertEqual(
+            [[2, 0], [2, 1], [0, 1], [0, 0]],
+            [pin["rotated_contact_offset"] for pin in chip["pins"]],
+        )
+        self.assertEqual(
+            ["0x06000943", "0x06000B8C"],
+            catalog["pin_contact_model"]["method_tokens"],
+        )
 
     def test_manual_validation_rejects_pin_geometry_mismatch(self) -> None:
         spec = MANUAL_PARTS["DX300"]
