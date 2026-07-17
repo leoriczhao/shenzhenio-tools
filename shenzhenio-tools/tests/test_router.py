@@ -6,7 +6,9 @@ from shzio import MC6000
 from shzio.api import Solution
 from shzio.boards import Board, Sz035
 from shzio.model import BoardPort, Net, PinDirection, PinKind
+from shzio.physical import analyze_physical_nets
 from shzio.router import RoutingError, route_nets
+from shzio.traces import LEFT, RIGHT, TraceGrid
 
 
 class VirtualRealityBuzzer(Solution):
@@ -65,6 +67,46 @@ class RouterTests(unittest.TestCase):
                 [],
                 [Net(ports["left"].pin(), ports["right"].pin())],
             )
+
+    def test_reuses_and_preserves_initial_trace_components(self) -> None:
+        ports = {
+            name: BoardPort(
+                name=name,
+                pin_name="pin",
+                kind=PinKind.SIMPLE,
+                direction=PinDirection.BIDIRECTIONAL,
+                x=x,
+                y=2,
+            )
+            for name, x in (("left", 1), ("right", 5))
+        }
+        board = Board(
+            puzzle_id="initial-trace",
+            width=7,
+            height=5,
+            placement_size=(5, 3),
+            ports=ports,
+            routable_cells=frozenset((x, 2) for x in range(1, 6)),
+            traces=TraceGrid.from_masks(
+                7,
+                5,
+                {(1, 2): RIGHT, (2, 2): LEFT},
+            ),
+        )
+
+        result = route_nets(
+            board,
+            [],
+            [Net(ports["left"].pin(), ports["right"].pin())],
+        )
+        board.traces = result.traces
+
+        self.assertEqual({(x, 2) for x in range(1, 6)}, set(result.traces.nonempty_cells()))
+        endpoint_sets = {
+            frozenset(endpoint.label for endpoint in net.endpoints)
+            for net in analyze_physical_nets(board, [])
+        }
+        self.assertIn(frozenset({"left.pin", "right.pin"}), endpoint_sets)
 
 
 if __name__ == "__main__":

@@ -77,8 +77,8 @@ def _check_parts(solution: Solution) -> list[Diagnostic]:
 
 
 def _bridge_terminal_overlap_allowed(a: Part, b: Part) -> bool:
-    bridge, terminal = (a, b) if a.type_name == "BRIDGE" else (b, a)
-    if bridge.type_name != "BRIDGE" or terminal.type_name != "TERMINAL":
+    bridge, terminal = (a, b) if a.spec.chip_kind_value == 2 else (b, a)
+    if bridge.spec.chip_kind_value != 2 or terminal.spec.chip_kind_value != 1:
         return False
     if bridge.x is None or bridge.y is None or terminal.x is None or terminal.y is None:
         return False

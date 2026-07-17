@@ -173,7 +173,7 @@ def build_chip_catalog(
         "pin_kind_values": {str(key): value for key, value in sorted(pin_kind_names.items())},
         "pin_contact_model": {
             "coordinate_space": "solution-canvas",
-            "chip_position": "top-left-origin-stored-without-transform",
+            "chip_position": "bottom-left-origin-stored-without-transform",
             "rotation": "180-degrees",
             "method_tokens": ["0x06000943", "0x06000B8C"],
             "single_pin_at_origin_field": profile.single_pin_at_origin_field,
@@ -211,6 +211,28 @@ def write_chip_catalog(
         encoding="utf-8",
     )
     return output_path, payload
+
+
+def load_chip_catalog(path: str | Path = DEFAULT_OUTPUT) -> dict[str, Any]:
+    source = Path(path).resolve()
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ChipCatalogError(f"failed to read chip catalog {source}: {exc}") from exc
+    if payload.get("format") != FORMAT_NAME:
+        raise ChipCatalogError(
+            f"unexpected chip catalog format {payload.get('format')!r}"
+        )
+    return payload
+
+
+def find_chip(payload: dict[str, Any], type_name: str) -> dict[str, Any]:
+    matches = [chip for chip in payload.get("chips", []) if chip.get("type") == type_name]
+    if len(matches) != 1:
+        raise ChipCatalogError(
+            f"expected one chip type {type_name!r}, found {len(matches)}"
+        )
+    return matches[0]
 
 
 def _type(metadata: dict[str, Any], name: str) -> dict[str, Any]:

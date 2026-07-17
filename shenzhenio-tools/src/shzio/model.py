@@ -8,6 +8,7 @@ from typing import Iterable
 class PinKind(str, Enum):
     SIMPLE = "simple"
     XBUS = "xbus"
+    DISPLAY = "display"
 
 
 class PinDirection(str, Enum):
@@ -47,6 +48,7 @@ class PartSpec:
     max_code_lines: int | None
     registers: tuple[str, ...]
     pins: dict[str, PinSpec]
+    chip_kind_value: int | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,15 @@ class Part(Connectable):
     def __post_init__(self) -> None:
         if self.name is None:
             self.name = self.spec.type_name.lower()
+
+    def __getattr__(self, name: str) -> PinRef | RegisterRef:
+        spec = self.__dict__.get("spec")
+        if spec is not None:
+            if name in spec.pins:
+                return self.pin(name)
+            if name in spec.registers:
+                return self.register(name)
+        raise AttributeError(f"{type(self).__name__} has no attribute {name!r}")
 
     @property
     def type_name(self) -> str:

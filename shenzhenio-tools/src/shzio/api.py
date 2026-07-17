@@ -3,20 +3,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Type
 
-from .boards import Board
+from .boards import Board, board_from_id
 from .model import Net, Part, PinRef
 from .router import RoutingResult, route_nets
 from .solution_file import SavedChip, SavedSolution
 
 
 class Solution:
-    board: Type[Board] | Board
+    board: Type[Board] | Board | str
     name = "Untitled"
     auto_route = True
 
     def __init__(self) -> None:
         board = self.board
-        self.board = board() if isinstance(board, type) else board
+        if isinstance(board, str):
+            self.board = board_from_id(board)
+        else:
+            self.board = board() if isinstance(board, type) else board
         self.parts: list[Part] = []
         self.nets: list[Net] = []
         self.routing_result: RoutingResult | None = None

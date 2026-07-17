@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .board_catalog import BoardCatalogError, write_board_catalog
+from .board_catalog import BoardCatalogError, load_board_catalog, write_board_catalog
 from .board_compare import compare_board_to_puzzle
 from .boards import BOARD_CLASSES, board_from_id
 from .checker import check_solution
@@ -17,7 +17,7 @@ from .game_metadata import GameMetadataError, extract_game_metadata
 from .game_strings import GameStringError, write_game_strings
 from .loader import load_solution
 from .physical import analyze_physical_nets
-from .parts import PART_SPECS, part_from_type
+from .parts import PART_SPECS, load_catalog_part_specs, part_from_type
 from .puzzle_catalog import (
     PuzzleCatalogError,
     find_puzzle,
@@ -271,13 +271,18 @@ def _analyze_txt(path: Path) -> int:
 
 def _parts_info() -> int:
     payload = []
-    for spec in PART_SPECS.values():
+    try:
+        specs = {**load_catalog_part_specs(), **PART_SPECS}
+    except ChipCatalogError:
+        specs = PART_SPECS
+    for spec in specs.values():
         payload.append(
             {
                 "type": spec.type_name,
                 "size": [spec.width, spec.height],
                 "cost": spec.cost,
                 "max_code_lines": spec.max_code_lines,
+                "chip_kind_value": spec.chip_kind_value,
                 "registers": list(spec.registers),
                 "pins": {
                     name: {
@@ -302,12 +307,19 @@ def _parts_info() -> int:
 
 def _boards_info() -> int:
     payload = []
-    for puzzle_id, cls in BOARD_CLASSES.items():
-        board = cls()
+    try:
+        puzzle_ids = [record["id"] for record in load_board_catalog()["boards"]]
+    except BoardCatalogError:
+        puzzle_ids = list(BOARD_CLASSES)
+    for puzzle_id in puzzle_ids:
+        board = board_from_id(puzzle_id)
         payload.append(
             {
                 "puzzle_id": puzzle_id,
                 "size": [board.width, board.height],
+                "placement_origin": list(board.placement_origin),
+                "placement_size": list(board.placement_size),
+                "routable_cells": len(board.routable_cells),
                 "fixed_parts": [
                     {
                         "name": part.name,
@@ -326,6 +338,10 @@ def _boards_info() -> int:
                         "label": port.label,
                     }
                     for name, port in board.ports.items()
+                },
+                "bound_terminals": {
+                    name: f"{pin.owner.name}.{pin.name}"
+                    for name, pin in board.terminal_bindings.items()
                 },
                 "traces": board.traces.rows if board.traces is not None else [],
             }

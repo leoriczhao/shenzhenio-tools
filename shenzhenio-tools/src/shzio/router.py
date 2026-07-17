@@ -7,7 +7,7 @@ from typing import Iterable
 
 from .boards import Board
 from .model import Net, Part, PinRef
-from .physical import endpoint_for_pin_ref, endpoints_for_design
+from .physical import endpoint_for_pin_ref, endpoints_for_design, trace_components
 from .traces import DOWN, EXISTS, LEFT, RIGHT, UP, TraceGrid
 
 
@@ -50,13 +50,23 @@ class DeterministicRouter:
     def route(self, board: Board, parts: list[Part], nets: list[Net]) -> RoutingResult:
         if not nets:
             return RoutingResult(
-                TraceGrid.blank(board.width, board.height),
+                board.traces.copy()
+                if board.traces is not None
+                else TraceGrid.blank(board.width, board.height),
                 (),
             )
         if not board.routable_cells:
             raise RoutingError(f"board {board.puzzle_id} has no routable-cell model")
 
         logical_nets = _logical_nets(nets)
+        initial_masks = (
+            board.traces.nonempty_cells() if board.traces is not None else {}
+        )
+        initial_components = _initial_trace_components(
+            board,
+            logical_nets,
+            initial_masks,
+        )
         contacts = {
             (endpoint.x, endpoint.y)
             for endpoint in endpoints_for_design(board, parts)
@@ -64,7 +74,13 @@ class DeterministicRouter:
         last_error: RoutingError | None = None
         for order in _route_orders(logical_nets, self.max_order_attempts):
             try:
-                return self._route_in_order(board, order, contacts)
+                return self._route_in_order(
+                    board,
+                    order,
+                    contacts,
+                    initial_masks,
+                    initial_components,
+                )
             except RoutingError as exc:
                 last_error = exc
         assert last_error is not None
@@ -78,9 +94,11 @@ class DeterministicRouter:
         board: Board,
         logical_nets: tuple[_LogicalNet, ...],
         contacts: set[tuple[int, int]],
+        initial_masks: dict[tuple[int, int], int],
+        initial_components: dict[int | None, tuple[frozenset[tuple[int, int]], ...]],
     ) -> RoutingResult:
-        masks: dict[tuple[int, int], int] = {}
-        occupied: set[tuple[int, int]] = set()
+        masks = initial_masks.copy()
+        occupied = set(initial_masks)
         routed: dict[int, RoutedNet] = {}
 
         for logical_net in logical_nets:
@@ -92,10 +110,25 @@ class DeterministicRouter:
                         f"endpoint {_pin_labels(logical_net.pins)} at {cell} is not routable"
                     )
 
-            tree = {unique_endpoints[0]}
+            seed_components = initial_components.get(logical_net.source_index, ())
+            own_seed_cells = set().union(*seed_components) if seed_components else set()
+            occupied.difference_update(own_seed_cells)
+            if seed_components:
+                tree = set(seed_components[0])
+                pending = [min(component) for component in seed_components[1:]]
+                pending.extend(
+                    endpoint for endpoint in unique_endpoints if endpoint not in tree
+                )
+            else:
+                tree = {unique_endpoints[0]}
+                pending = list(unique_endpoints[1:])
             edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
             blocked_contacts = contacts - set(unique_endpoints)
-            for endpoint in unique_endpoints[1:]:
+            for endpoint in pending:
+                component = next(
+                    (item for item in seed_components if endpoint in item),
+                    frozenset({endpoint}),
+                )
                 path = _lee_path(
                     start=endpoint,
                     targets=tree,
@@ -105,6 +138,7 @@ class DeterministicRouter:
                 for a, b in zip(path, path[1:]):
                     edges.add((a, b))
                 tree.update(path)
+                tree.update(component)
 
             if tree & occupied:
                 raise RoutingError(
@@ -172,6 +206,45 @@ def _logical_nets(nets: list[Net]) -> list[_LogicalNet]:
     ]
     logical_nets.sort(key=lambda item: item.source_index)
     return logical_nets
+
+
+def _initial_trace_components(
+    board: Board,
+    logical_nets: list[_LogicalNet],
+    initial_masks: dict[tuple[int, int], int],
+) -> dict[int | None, tuple[frozenset[tuple[int, int]], ...]]:
+    if not initial_masks:
+        return {}
+    outside = set(initial_masks) - board.routable_cells
+    if outside:
+        raise RoutingError(
+            f"board {board.puzzle_id} has initial traces outside the routable area: "
+            f"{sorted(outside)}"
+        )
+
+    component_ids = trace_components(board.traces) if board.traces is not None else {}
+    cells_by_component: dict[int, set[tuple[int, int]]] = {}
+    for cell, component_id in component_ids.items():
+        cells_by_component.setdefault(component_id, set()).add(cell)
+
+    endpoint_owners: dict[tuple[int, int], set[int]] = {}
+    for logical_net in logical_nets:
+        for pin in logical_net.pins:
+            endpoint_owners.setdefault(_pin_coordinate(pin), set()).add(
+                logical_net.source_index
+            )
+
+    grouped: dict[int | None, list[frozenset[tuple[int, int]]]] = {}
+    for cells in cells_by_component.values():
+        owners = set().union(*(endpoint_owners.get(cell, set()) for cell in cells))
+        if len(owners) > 1:
+            raise RoutingError(
+                f"an initial trace component on {board.puzzle_id} shorts API nets "
+                f"{sorted(owners)}"
+            )
+        owner = next(iter(owners)) if owners else None
+        grouped.setdefault(owner, []).append(frozenset(cells))
+    return {owner: tuple(components) for owner, components in grouped.items()}
 
 
 def _route_orders(

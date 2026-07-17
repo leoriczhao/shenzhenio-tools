@@ -84,8 +84,18 @@ from the highest y coordinate to the lowest.
 `Solution` routes declared API nets after `build()` by default. The current
 router handles two-pin and multi-endpoint logical nets, blocks unrelated pin
 contacts, prevents networks from sharing trace cells, and retries deterministic
-network orders. It intentionally leaves bridge crossings, locked initial
-traces, route hints, and placement search to the next routing stages.
+network orders. It preserves locked initial traces and can extend a component
+that already touches the same logical network. It intentionally leaves bridge
+crossings, route hints, negotiated congestion, and placement search to the next
+routing stages.
+
+The normalized catalogs are also executable runtime data. `part_from_type()`
+can construct any of the 66 extracted component packages as a `Part`, while
+`board_from_id()` and `Solution.board = "Sz035"` construct any of the 50 board
+models with provided parts, external ports, terminal-to-pin bindings, routable
+cells, placement bounds, and initial traces. Friendly manual names remain valid:
+for example, a catalog RADIO binding recorded as pin index 3 resolves to
+`radio.rx` even though its generated catalog alias is `x1`.
 
 `compare-board-catalog` performs a three-state comparison between extracted
 facts and a hand-written `Board`: comparable fields are `match` or `mismatch`,

@@ -39,7 +39,7 @@ def analyze_physical_nets(board: Board, parts: list[Part]) -> list[PhysicalNet]:
     if grid is None:
         return []
 
-    component_by_cell = _trace_components(grid)
+    component_by_cell = trace_components(grid)
     nets: dict[int, PhysicalNet] = {}
     for cell, component_id in component_by_cell.items():
         nets.setdefault(component_id, PhysicalNet()).cells.add(cell)
@@ -103,7 +103,7 @@ def _endpoint_for_port(port: BoardPort) -> PhysicalEndpoint | None:
     )
 
 
-def _trace_components(grid: TraceGrid) -> dict[tuple[int, int], int]:
+def trace_components(grid: TraceGrid) -> dict[tuple[int, int], int]:
     seen: set[tuple[int, int]] = set()
     component_by_cell: dict[tuple[int, int], int] = {}
     next_id = 1
