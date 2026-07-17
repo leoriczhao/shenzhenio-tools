@@ -51,6 +51,11 @@ def _check_parts(solution: Solution) -> list[Diagnostic]:
     placement_width, placement_height = solution.board.placement_size
     max_x = min_x + placement_width
     max_y = min_y + placement_height
+    terminal_cells = {
+        (port.x, port.y): port
+        for port in solution.board.ports.values()
+        if port.kind != PinKind.DISPLAY and port.x is not None and port.y is not None
+    }
     for part in all_parts:
         if part.x is None or part.y is None:
             diagnostics.append(Diagnostic("error", f"part {part.name} has no placement"))
@@ -72,6 +77,16 @@ def _check_parts(solution: Solution) -> list[Diagnostic]:
                     part, occupied[pos]
                 ):
                     diagnostics.append(Diagnostic("error", f"part {part.name} overlaps {occupied[pos].name} at {pos}"))
+                terminal = terminal_cells.get(pos)
+                if terminal is not None and not _bridge_port_overlap_allowed(
+                    part, pos
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            "error",
+                            f"part {part.name} overlaps board terminal {terminal.name} at {pos}",
+                        )
+                    )
                 occupied[pos] = part
     return diagnostics
 
@@ -83,6 +98,15 @@ def _bridge_terminal_overlap_allowed(a: Part, b: Part) -> bool:
     if bridge.x is None or bridge.y is None or terminal.x is None or terminal.y is None:
         return False
     return (terminal.x, terminal.y) == (bridge.x, bridge.y + 1)
+
+
+def _bridge_port_overlap_allowed(part: Part, position: tuple[int, int]) -> bool:
+    return (
+        part.spec.chip_kind_value == 2
+        and part.x is not None
+        and part.y is not None
+        and position == (part.x, part.y + 1)
+    )
 
 
 def _check_programs(solution: Solution) -> list[Diagnostic]:

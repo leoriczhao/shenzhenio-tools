@@ -7,7 +7,12 @@ from typing import Iterable
 
 from .boards import Board
 from .model import Net, Part, PinRef
-from .physical import endpoint_for_pin_ref, endpoints_for_design, trace_components
+from .physical import (
+    bridge_origins,
+    endpoint_for_pin_ref,
+    endpoints_for_design,
+    trace_components,
+)
 from .traces import DOWN, EXISTS, LEFT, RIGHT, UP, TraceGrid
 
 
@@ -39,6 +44,7 @@ class RoutingResult:
 class _LogicalNet:
     pins: list[PinRef]
     source_index: int
+    route_hints: tuple[tuple[int, int], ...]
 
 
 class DeterministicRouter:
@@ -59,6 +65,7 @@ class DeterministicRouter:
             raise RoutingError(f"board {board.puzzle_id} has no routable-cell model")
 
         logical_nets = _logical_nets(nets)
+        bridge_edges = _bridge_edges(bridge_origins(board, parts))
         initial_masks = (
             board.traces.nonempty_cells() if board.traces is not None else {}
         )
@@ -66,6 +73,7 @@ class DeterministicRouter:
             board,
             logical_nets,
             initial_masks,
+            bridge_edges,
         )
         contacts = {
             (endpoint.x, endpoint.y)
@@ -80,6 +88,7 @@ class DeterministicRouter:
                     contacts,
                     initial_masks,
                     initial_components,
+                    bridge_edges,
                 )
             except RoutingError as exc:
                 last_error = exc
@@ -96,6 +105,7 @@ class DeterministicRouter:
         contacts: set[tuple[int, int]],
         initial_masks: dict[tuple[int, int], int],
         initial_components: dict[int | None, tuple[frozenset[tuple[int, int]], ...]],
+        bridge_edges: dict[tuple[int, int], tuple[int, int]],
     ) -> RoutingResult:
         masks = initial_masks.copy()
         occupied = set(initial_masks)
@@ -109,6 +119,16 @@ class DeterministicRouter:
                     raise RoutingError(
                         f"endpoint {_pin_labels(logical_net.pins)} at {cell} is not routable"
                     )
+            for hint in logical_net.route_hints:
+                if hint not in board.routable_cells:
+                    raise RoutingError(
+                        f"route hint {hint} for {_pin_labels(logical_net.pins)} is not routable"
+                    )
+                if hint in contacts and hint not in unique_endpoints:
+                    raise RoutingError(
+                        f"route hint {hint} for {_pin_labels(logical_net.pins)} "
+                        "is an unrelated pin contact"
+                    )
 
             seed_components = initial_components.get(logical_net.source_index, ())
             own_seed_cells = set().union(*seed_components) if seed_components else set()
@@ -116,12 +136,14 @@ class DeterministicRouter:
             if seed_components:
                 tree = set(seed_components[0])
                 pending = [min(component) for component in seed_components[1:]]
+                pending.extend(logical_net.route_hints)
                 pending.extend(
                     endpoint for endpoint in unique_endpoints if endpoint not in tree
                 )
             else:
                 tree = {unique_endpoints[0]}
-                pending = list(unique_endpoints[1:])
+                pending = [*logical_net.route_hints, *unique_endpoints[1:]]
+            pending = list(dict.fromkeys(cell for cell in pending if cell not in tree))
             edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
             blocked_contacts = contacts - set(unique_endpoints)
             for endpoint in pending:
@@ -134,6 +156,7 @@ class DeterministicRouter:
                     targets=tree,
                     allowed=board.routable_cells,
                     blocked=occupied | blocked_contacts,
+                    bridge_edges=bridge_edges,
                 )
                 for a, b in zip(path, path[1:]):
                     edges.add((a, b))
@@ -148,7 +171,7 @@ class DeterministicRouter:
             for cell in tree:
                 masks[cell] = masks.get(cell, 0) | EXISTS
             for a, b in edges:
-                _connect_masks(masks, a, b)
+                _connect_masks(masks, a, b, bridge_edges)
             routed[logical_net.source_index] = RoutedNet(
                 tuple(logical_net.pins), frozenset(tree)
             )
@@ -201,10 +224,26 @@ def _logical_nets(nets: list[Net]) -> list[_LogicalNet]:
         _LogicalNet(
             pins=[pins[item] for item in sorted(items, key=first_seen.__getitem__)],
             source_index=min(first_seen[item] for item in items),
+            route_hints=(),
         )
         for items in grouped.values()
     ]
     logical_nets.sort(key=lambda item: item.source_index)
+    by_pin = {
+        (id(pin.owner), pin.name): logical_net
+        for logical_net in logical_nets
+        for pin in logical_net.pins
+    }
+    hints: dict[int, list[tuple[int, int]]] = {
+        logical_net.source_index: [] for logical_net in logical_nets
+    }
+    for net in nets:
+        logical_net = by_pin[(id(net.a.owner), net.a.name)]
+        hints[logical_net.source_index].extend(net.route_hints)
+    for logical_net in logical_nets:
+        logical_net.route_hints = tuple(
+            dict.fromkeys(hints[logical_net.source_index])
+        )
     return logical_nets
 
 
@@ -212,6 +251,7 @@ def _initial_trace_components(
     board: Board,
     logical_nets: list[_LogicalNet],
     initial_masks: dict[tuple[int, int], int],
+    bridge_edges: dict[tuple[int, int], tuple[int, int]],
 ) -> dict[int | None, tuple[frozenset[tuple[int, int]], ...]]:
     if not initial_masks:
         return {}
@@ -222,7 +262,14 @@ def _initial_trace_components(
             f"{sorted(outside)}"
         )
 
-    component_ids = trace_components(board.traces) if board.traces is not None else {}
+    bridge_positions = [
+        cell for cell, neighbor in bridge_edges.items() if neighbor[1] > cell[1]
+    ]
+    component_ids = (
+        trace_components(board.traces, bridge_positions)
+        if board.traces is not None
+        else {}
+    )
     cells_by_component: dict[int, set[tuple[int, int]]] = {}
     for cell, component_id in component_ids.items():
         cells_by_component.setdefault(component_id, set()).add(cell)
@@ -290,6 +337,7 @@ def _lee_path(
     targets: set[tuple[int, int]],
     allowed: frozenset[tuple[int, int]],
     blocked: set[tuple[int, int]],
+    bridge_edges: dict[tuple[int, int], tuple[int, int]],
 ) -> list[tuple[int, int]]:
     if start in targets:
         return [start]
@@ -309,6 +357,17 @@ def _lee_path(
             if neighbor in targets:
                 return _reconstruct_path(parent, neighbor)
             queue.append(neighbor)
+        bridge_neighbor = bridge_edges.get(current)
+        if (
+            bridge_neighbor is not None
+            and bridge_neighbor not in parent
+            and bridge_neighbor in allowed
+            and (bridge_neighbor not in blocked or bridge_neighbor in targets)
+        ):
+            parent[bridge_neighbor] = current
+            if bridge_neighbor in targets:
+                return _reconstruct_path(parent, bridge_neighbor)
+            queue.append(bridge_neighbor)
 
     raise RoutingError(f"no legal trace path from {start} to the existing net tree")
 
@@ -328,6 +387,7 @@ def _connect_masks(
     masks: dict[tuple[int, int], int],
     a: tuple[int, int],
     b: tuple[int, int],
+    bridge_edges: dict[tuple[int, int], tuple[int, int]],
 ) -> None:
     dx = b[0] - a[0]
     dy = b[1] - a[1]
@@ -336,7 +396,21 @@ def _connect_masks(
             masks[a] = masks.get(a, EXISTS) | EXISTS | forward
             masks[b] = masks.get(b, EXISTS) | EXISTS | backward
             return
+    if bridge_edges.get(a) == b:
+        masks[a] = masks.get(a, 0) | EXISTS
+        masks[b] = masks.get(b, 0) | EXISTS
+        return
     raise RoutingError(f"trace edge {a} -> {b} is not cardinal and adjacent")
+
+
+def _bridge_edges(
+    origins: Iterable[tuple[int, int]],
+) -> dict[tuple[int, int], tuple[int, int]]:
+    edges = {}
+    for x, y in origins:
+        edges[(x, y)] = (x, y + 2)
+        edges[(x, y + 2)] = (x, y)
+    return edges
 
 
 def _pin_coordinate(pin: PinRef) -> tuple[int, int]:

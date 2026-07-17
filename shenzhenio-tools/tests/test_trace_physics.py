@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from shzio import MC6000
-from shzio.boards import Sz035
+from shzio import Bridge, MC6000
+from shzio.boards import Board, Sz035
 from shzio.checker import check_solution
+from shzio.model import BoardPort, PinDirection, PinKind
 from shzio.physical import analyze_physical_nets, endpoint_for_pin
 from shzio.traces import DOWN, EXISTS, LEFT, RIGHT, UP, TraceGrid, decode_char, encode_mask
 from shzio.api import Solution
@@ -108,6 +109,46 @@ class TracePhysicsTests(unittest.TestCase):
 
         messages = "\n".join(str(item) for item in check_solution(solution))
         self.assertIn("has no reciprocal direction bit", messages)
+
+    def test_only_bridge_middle_may_overlap_a_board_terminal(self) -> None:
+        board = Board(
+            puzzle_id="terminal-overlap",
+            width=5,
+            height=5,
+            placement_size=(3, 3),
+            ports={
+                "terminal": BoardPort(
+                    name="terminal",
+                    pin_name="input",
+                    kind=PinKind.SIMPLE,
+                    direction=PinDirection.INPUT,
+                    x=2,
+                    y=2,
+                )
+            },
+            routable_cells=frozenset({(2, 1), (2, 2), (2, 3)}),
+        )
+
+        class NormalOverlap(Solution):
+            auto_route = False
+
+            def build(self) -> None:
+                self.place(MC6000("cpu"), at=(1, 1))
+
+        class BridgeOverlap(Solution):
+            auto_route = False
+
+            def build(self) -> None:
+                self.place(Bridge(), at=(2, 1))
+
+        NormalOverlap.board = board
+        BridgeOverlap.board = board
+        normal_messages = "\n".join(
+            str(item) for item in check_solution(NormalOverlap())
+        )
+
+        self.assertIn("overlaps board terminal terminal", normal_messages)
+        self.assertEqual([], check_solution(BridgeOverlap()))
 
 
 if __name__ == "__main__":

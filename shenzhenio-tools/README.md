@@ -84,10 +84,16 @@ from the highest y coordinate to the lowest.
 `Solution` routes declared API nets after `build()` by default. The current
 router handles two-pin and multi-endpoint logical nets, blocks unrelated pin
 contacts, prevents networks from sharing trace cells, and retries deterministic
-network orders. It preserves locked initial traces and can extend a component
-that already touches the same logical network. It intentionally leaves bridge
-crossings, route hints, negotiated congestion, and placement search to the next
-routing stages.
+network orders. It preserves locked initial traces, can extend a component
+that already touches the same logical network, and supports bridge crossings
+and user-supplied route hints.
+
+`connect(a, b, via=[(x, y), ...])` adds mandatory route cells. `Bridge()` adds
+the game's special `(x, y) <-> (x, y + 2)` electrical edge without occupying
+the middle trace cell, allowing a vertical net to cross a horizontal net. The
+checker permits a bridge's middle footprint cell to overlap a board terminal,
+matching the editor's sole component-overlap exception. Negotiated congestion
+and placement search are still pending.
 
 The normalized catalogs are also executable runtime data. `part_from_type()`
 can construct any of the 66 extracted component packages as a `Part`, while

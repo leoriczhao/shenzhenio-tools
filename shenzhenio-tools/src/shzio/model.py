@@ -201,6 +201,7 @@ class Net:
     a: PinRef
     b: PinRef
     name: str | None = None
+    route_hints: tuple[tuple[int, int], ...] = ()
 
     @property
     def kind(self) -> PinKind:

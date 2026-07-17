@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Type
+from typing import Iterable, Type
 
 from .boards import Board, board_from_id
 from .model import Net, Part, PinRef
@@ -37,8 +37,23 @@ class Solution:
         self.parts.append(part)
         return part
 
-    def connect(self, a: PinRef, b: PinRef, name: str | None = None) -> Net:
-        net = Net(a, b, name=name)
+    def connect(
+        self,
+        a: PinRef,
+        b: PinRef,
+        name: str | None = None,
+        via: Iterable[tuple[int, int]] = (),
+    ) -> Net:
+        route_hints = []
+        for position in via:
+            if (
+                not isinstance(position, (tuple, list))
+                or len(position) != 2
+                or not all(isinstance(value, int) for value in position)
+            ):
+                raise ValueError("route hints must be (x, y) integer pairs")
+            route_hints.append((position[0], position[1]))
+        net = Net(a, b, name=name, route_hints=tuple(route_hints))
         self.nets.append(net)
         return net
 

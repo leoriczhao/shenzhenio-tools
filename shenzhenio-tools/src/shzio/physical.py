@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Iterable
 
 from .boards import Board
 from .model import BoardPort, Part, PinKind, PinRef
@@ -39,7 +40,7 @@ def analyze_physical_nets(board: Board, parts: list[Part]) -> list[PhysicalNet]:
     if grid is None:
         return []
 
-    component_by_cell = trace_components(grid)
+    component_by_cell = trace_components(grid, bridge_origins(board, parts))
     nets: dict[int, PhysicalNet] = {}
     for cell, component_id in component_by_cell.items():
         nets.setdefault(component_id, PhysicalNet()).cells.add(cell)
@@ -91,6 +92,14 @@ def endpoints_for_design(board: Board, parts: list[Part]) -> list[PhysicalEndpoi
     return endpoints
 
 
+def bridge_origins(board: Board, parts: list[Part]) -> frozenset[tuple[int, int]]:
+    return frozenset(
+        (part.x, part.y)
+        for part in [*parts, *board.fixed_parts]
+        if part.spec.chip_kind_value == 2 and part.x is not None and part.y is not None
+    )
+
+
 def _endpoint_for_port(port: BoardPort) -> PhysicalEndpoint | None:
     if port.x is None or port.y is None:
         return None
@@ -103,7 +112,14 @@ def _endpoint_for_port(port: BoardPort) -> PhysicalEndpoint | None:
     )
 
 
-def trace_components(grid: TraceGrid) -> dict[tuple[int, int], int]:
+def trace_components(
+    grid: TraceGrid,
+    bridges: Iterable[tuple[int, int]] = (),
+) -> dict[tuple[int, int], int]:
+    bridge_edges: dict[tuple[int, int], tuple[int, int]] = {}
+    for x, y in bridges:
+        bridge_edges[(x, y)] = (x, y + 2)
+        bridge_edges[(x, y + 2)] = (x, y)
     seen: set[tuple[int, int]] = set()
     component_by_cell: dict[tuple[int, int], int] = {}
     next_id = 1
@@ -130,6 +146,16 @@ def trace_components(grid: TraceGrid) -> dict[tuple[int, int], int]:
                     if (nx, ny) not in seen:
                         seen.add((nx, ny))
                         stack.append((nx, ny))
+                bridge_neighbor = bridge_edges.get(cell)
+                if (
+                    bridge_neighbor is not None
+                    and bridge_neighbor not in seen
+                    and 0 <= bridge_neighbor[0] < grid.width
+                    and 0 <= bridge_neighbor[1] < grid.height
+                    and grid.mask_at(*bridge_neighbor) != 0
+                ):
+                    seen.add(bridge_neighbor)
+                    stack.append(bridge_neighbor)
             next_id += 1
 
     return component_by_cell

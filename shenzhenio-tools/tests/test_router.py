@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from shzio import MC6000
+from shzio import Bridge, MC6000
 from shzio.api import Solution
 from shzio.boards import Board, Sz035
 from shzio.model import BoardPort, Net, PinDirection, PinKind
@@ -21,6 +21,23 @@ class VirtualRealityBuzzer(Solution):
 
 
 class RouterTests(unittest.TestCase):
+    def test_route_hint_is_included_in_the_routed_net(self) -> None:
+        class HintedBuzzer(Solution):
+            board = Sz035
+
+            def build(self) -> None:
+                cpu = self.place(MC6000("cpu"), at=(11, 5))
+                self.connect(
+                    self.board.radio.rx,
+                    cpu.x0,
+                    via=[(6, 7)],
+                )
+                self.connect(cpu.p1, self.board.buzzer.input)
+
+        solution = HintedBuzzer()
+
+        self.assertIn((6, 7), solution.routing_result.nets[0].cells)
+
     def test_routes_sz035_without_using_unconnected_pin_contacts(self) -> None:
         solution = VirtualRealityBuzzer()
         grid = solution.board.traces
@@ -107,6 +124,53 @@ class RouterTests(unittest.TestCase):
             for net in analyze_physical_nets(board, [])
         }
         self.assertIn(frozenset({"left.pin", "right.pin"}), endpoint_sets)
+
+    def test_bridge_routes_one_net_over_another_without_sharing_middle_cell(self) -> None:
+        ports = {
+            name: BoardPort(
+                name=name,
+                pin_name="pin",
+                kind=PinKind.SIMPLE,
+                direction=PinDirection.BIDIRECTIONAL,
+                x=x,
+                y=y,
+            )
+            for name, x, y in (
+                ("left", 1, 2),
+                ("right", 3, 2),
+                ("bottom", 2, 1),
+                ("top", 2, 3),
+            )
+        }
+        board = Board(
+            puzzle_id="bridge-crossing",
+            width=5,
+            height=5,
+            placement_size=(3, 3),
+            ports=ports,
+            routable_cells=frozenset(
+                {(1, 2), (2, 2), (3, 2), (2, 1), (2, 3)}
+            ),
+        )
+        bridge = Bridge()
+        bridge.x, bridge.y = 2, 1
+        nets = [
+            Net(ports["left"].pin(), ports["right"].pin()),
+            Net(ports["bottom"].pin(), ports["top"].pin()),
+        ]
+
+        result = route_nets(board, [bridge], nets)
+        board.traces = result.traces
+        physical = {
+            frozenset(endpoint.label for endpoint in net.endpoints)
+            for net in analyze_physical_nets(board, [bridge])
+            if net.endpoints
+        }
+
+        self.assertEqual(0, result.traces.mask_at(2, 1) & 0xF)
+        self.assertEqual(0, result.traces.mask_at(2, 3) & 0xF)
+        self.assertIn(frozenset({"left.pin", "right.pin"}), physical)
+        self.assertIn(frozenset({"bottom.pin", "top.pin"}), physical)
 
 
 if __name__ == "__main__":

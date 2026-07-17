@@ -90,10 +90,22 @@ RADIO_SPEC = PartSpec(
     },
 )
 
+BRIDGE_SPEC = PartSpec(
+    type_name="BRIDGE",
+    width=1,
+    height=3,
+    cost=0,
+    max_code_lines=None,
+    registers=(),
+    pins={},
+    chip_kind_value=2,
+)
+
 PART_SPECS = {
     MC4000_SPEC.type_name: MC4000_SPEC,
     MC6000_SPEC.type_name: MC6000_SPEC,
     RADIO_SPEC.type_name: RADIO_SPEC,
+    BRIDGE_SPEC.type_name: BRIDGE_SPEC,
 }
 
 _CATALOG_PART_SPECS: dict[str, PartSpec] | None = None
@@ -120,6 +132,11 @@ class Radio(Part):
     @property
     def tx(self):
         return self.pin("tx")
+
+
+class Bridge(Part):
+    def __init__(self, name: str | None = None) -> None:
+        super().__init__(BRIDGE_SPEC, name=name)
 
 
 def part_from_type(type_name: str, name: str | None = None) -> Part:
