@@ -71,8 +71,8 @@ Python 方案代码
 | solution 解析/写回 | 已有基础实现 | 需要 corpus 级无损 round-trip |
 | Trace 位掩码 | 16 种方向组合已建模 | 需要旋转、边界与游戏差分测试 |
 | Python 电路 API | 可放置器件、连网、写程序 | 程序仍过度接近字符串，需要指令 AST |
-| 器件库 | MC4000、MC6000、Radio 临时手填 | 需要从 `ChipTypes` 自动提取完整目录 |
-| 开发板库 | 只有 `Sz035` 手工模型 | 需要从 `Puzzles` 和初始化路径批量提取 |
+| 器件库 | 已自动提取 66 个 `ChipType`；3 个手册基准已验证 | 需要补全行为分类并生成规范规格 |
+| 开发板库 | 已提取 50 个谜题的 raw board/terminal/provided-chip | 需要解出 tile 语义和坐标变换并生成 `BoardSpec` |
 | 静态检查 | 已能检查部分网络和物理接线 | 缺碰撞、旋转、方向、完整代码规则 |
 | 自定义谜题 | 可提取 Lua 板面和 terminal 元数据 | 缺完整语义和安全执行模型 |
 | 布局/布线 | 未实现通用算法 | 需要合法性引擎、router 和 placer |
@@ -80,7 +80,7 @@ Python 方案代码
 | Testbench | 未实现 | 需要事件流、波形断言和官方差分样例 |
 | 游戏闭环 | 已有进程检查和 install 雏形 | 需要批量验证和结果记录 |
 
-当前回归基线：9 个单元测试通过，`Sz035` 示例的静态检查通过。
+当前回归基线：21 个单元测试通过，`Sz035` 示例的静态检查通过。
 
 ## 4. 目标架构
 
@@ -185,7 +185,25 @@ flowchart TD
 
 ### Phase 1：游戏程序集只读提取器
 
-状态：下一步，最高优先级。
+状态：进行中。可行性门槛 G1 已通过，剩余工作是字段语义和规范化。
+
+当前提取结果：
+
+- 当前 `Shenzhen.exe` SHA-256 已记录。
+- 找到 1071 个托管类型和 66 个静态 `ChipType` 字段。
+- 已导出 `ChipTypes` 初始化方法和 `Puzzles..cctor` 的完整 IL。
+- 自动找到一个 `String(Int32)` 字符串解码候选及其 85 KB 嵌入资源。
+- 已静态恢复字符串索引/解码密钥，当前 365 个引用 ID 全部可解码。
+- 已把 `ChipTypes` 初始化路径切分为 66 个器件记录，66 个名称和类型 ID 均可恢复。
+- 已恢复器件价格、尺寸、解锁条件、引脚种类、寄存器映射和左右物理槽位。
+- 已切分 50 个官方 `Puzzle`，恢复 198 个 terminal 和 44 个 provided-chip 实例。
+- 50 块板的 RVA 初始化数据全部静态读出：全局画布为 22×14；tile 数组中 45 块为 22×14，5 块为 22×11。
+- consumer IL 证明每个板格由 3 个整数构成，第一列小于 0 表示空格；未知枚举列保留 raw。
+- `Sz035` 已恢复 `radio-rx`、`buzzer`、provided RADIO 和 terminal-to-pin 3 绑定。
+- `Sz035` 与手工 `BoardSpec` 的 7 个可比字段一致，位置/接点/tile 语义明确标为 unresolved。
+- MC4000、MC6000、DX300 已与中英文手册对应页交叉校验；不一致时构建失败。
+- DX300 左侧三个等价 XBus 仅使用生成别名，未伪装成手册官方名称。
+- 全过程使用 reflection-only，未执行游戏静态构造函数。
 
 任务：
 
@@ -199,9 +217,9 @@ flowchart TD
 
 可行性门槛 G1：
 
-- 至少正确提取 MC4000、MC6000、DX300 三种器件。
-- MC6000 的类型 ID、成本、尺寸和六个引脚与存档/手册一致。
-- 至少正确提取 `Sz035` 的 terminal、tile 或 provided-chip 数据之一。
+- [x] 至少正确提取 MC4000、MC6000、DX300 三种器件。
+- [x] MC6000 的类型 ID、成本、尺寸和六个引脚与存档/手册一致。
+- [x] 至少正确提取 `Sz035` 的 terminal、tile 或 provided-chip 数据之一。
 
 如果 G1 失败，保留提取到的部分数据，其余字段转为带证据的人工 override；不能继续猜测。
 
@@ -399,7 +417,7 @@ flowchart TD
 
 ## 8. 接下来三个工作包
 
-### Work Package A：器件提取可行性验证
+### Work Package A：器件提取可行性验证（已完成）
 
 - 创建只读程序集检查脚本。
 - 输出类型、字段、构造器、静态字段和 IL token。
@@ -408,7 +426,7 @@ flowchart TD
 
 完成后即可决定器件库能否全自动生成。
 
-### Work Package B：谜题和 provided-chip 提取
+### Work Package B：谜题和 provided-chip 提取（结构提取已完成）
 
 - 跟踪 `Puzzles` 静态构造函数。
 - 解析 terminal、tile、初始 Trace 和 provided chip 创建路径。

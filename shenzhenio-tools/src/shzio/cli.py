@@ -7,12 +7,22 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .checker import check_solution
+from .board_compare import compare_board_to_puzzle
 from .boards import BOARD_CLASSES, board_from_id
+from .checker import check_solution
+from .chip_catalog import ChipCatalogError, write_chip_catalog
 from .custom_spec import find_custom_spec_files, read_custom_spec
+from .game_metadata import GameMetadataError, extract_game_metadata
+from .game_strings import GameStringError, write_game_strings
 from .loader import load_solution
 from .physical import analyze_physical_nets
 from .parts import PART_SPECS, part_from_type
+from .puzzle_catalog import (
+    PuzzleCatalogError,
+    find_puzzle,
+    load_puzzle_catalog,
+    write_puzzle_catalog,
+)
 from .solution_file import SavedSolution
 
 
@@ -52,6 +62,47 @@ def main(argv: list[str] | None = None) -> int:
     p_scan_saves = sub.add_parser("scan-saves", help="summarize saved solution txt files for board database mining")
     p_scan_saves.add_argument("root")
 
+    p_extract_game = sub.add_parser("extract-game", help="extract read-only metadata and IL from Shenzhen.exe")
+    p_extract_game.add_argument("--exe", help="path to Shenzhen.exe; auto-detected by default")
+    p_extract_game.add_argument("--output", help="output JSON path; defaults to data/raw/game-metadata.json")
+
+    p_decode_game_strings = sub.add_parser(
+        "decode-game-strings",
+        help="decode game strings from reflection-only metadata",
+    )
+    p_decode_game_strings.add_argument(
+        "--metadata",
+        help="metadata JSON path; defaults to data/raw/game-metadata.json",
+    )
+    p_decode_game_strings.add_argument(
+        "--output",
+        help="output JSON path; defaults to data/raw/game-strings.json",
+    )
+
+    p_extract_chips = sub.add_parser(
+        "extract-chip-catalog",
+        help="build a chip and pin catalog from extracted game metadata",
+    )
+    p_extract_chips.add_argument("--metadata", help="game metadata JSON path")
+    p_extract_chips.add_argument("--strings", help="decoded game strings JSON path")
+    p_extract_chips.add_argument("--output", help="output JSON path")
+
+    p_extract_puzzles = sub.add_parser(
+        "extract-puzzle-catalog",
+        help="build the official puzzle and board catalog from extracted game metadata",
+    )
+    p_extract_puzzles.add_argument("--metadata", help="game metadata JSON path")
+    p_extract_puzzles.add_argument("--strings", help="decoded game strings JSON path")
+    p_extract_puzzles.add_argument("--chips", help="extracted chip catalog JSON path")
+    p_extract_puzzles.add_argument("--output", help="output JSON path")
+
+    p_compare_board = sub.add_parser(
+        "compare-board-catalog",
+        help="compare a hand-written BoardSpec with the extracted puzzle catalog",
+    )
+    p_compare_board.add_argument("puzzle")
+    p_compare_board.add_argument("--catalog", help="puzzle catalog JSON path")
+
     p_install = sub.add_parser("install", help="copy a built solution into a save directory")
     p_install.add_argument("source")
     p_install.add_argument("dest")
@@ -80,6 +131,34 @@ def main(argv: list[str] | None = None) -> int:
         return _scan_custom(Path(args.root))
     if args.command == "scan-saves":
         return _scan_saves(Path(args.root))
+    if args.command == "extract-game":
+        return _extract_game(
+            Path(args.exe) if args.exe else None,
+            Path(args.output) if args.output else None,
+        )
+    if args.command == "decode-game-strings":
+        return _decode_game_strings(
+            Path(args.metadata) if args.metadata else None,
+            Path(args.output) if args.output else None,
+        )
+    if args.command == "extract-chip-catalog":
+        return _extract_chip_catalog(
+            Path(args.metadata) if args.metadata else None,
+            Path(args.strings) if args.strings else None,
+            Path(args.output) if args.output else None,
+        )
+    if args.command == "extract-puzzle-catalog":
+        return _extract_puzzle_catalog(
+            Path(args.metadata) if args.metadata else None,
+            Path(args.strings) if args.strings else None,
+            Path(args.chips) if args.chips else None,
+            Path(args.output) if args.output else None,
+        )
+    if args.command == "compare-board-catalog":
+        return _compare_board_catalog(
+            args.puzzle,
+            Path(args.catalog) if args.catalog else None,
+        )
     if args.command == "install":
         return _install(Path(args.source), Path(args.dest), force=args.force)
     parser.error("unknown command")
@@ -297,6 +376,118 @@ def _scan_saves(root: Path) -> int:
         )
     print(json.dumps(rows, ensure_ascii=False, indent=2))
     return 0
+
+
+def _extract_game(game_exe: Path | None, output: Path | None) -> int:
+    try:
+        output_path, payload = extract_game_metadata(game_exe, output)
+    except GameMetadataError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    summary = payload["summary"]
+    print(output_path)
+    print(f"sha256: {payload['source']['sha256']}")
+    print(f"types: {summary['type_count']}")
+    print(f"chip type fields: {summary['chip_type_static_field_count']}")
+    print(f"disassembled methods: {summary['disassembled_method_count']}")
+    print(f"string decoder candidates: {summary['string_decoder_candidate_count']}")
+    return 0
+
+
+def _decode_game_strings(metadata: Path | None, output: Path | None) -> int:
+    try:
+        kwargs = {}
+        if metadata is not None:
+            kwargs["metadata_path"] = metadata
+        if output is not None:
+            kwargs["output"] = output
+        output_path, payload = write_game_strings(**kwargs)
+    except (GameMetadataError, GameStringError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    summary = payload["summary"]
+    print(output_path)
+    print(f"references: {summary['reference_count']}")
+    print(f"unique string ids: {summary['unique_id_count']}")
+    print(f"decoded strings: {summary['decoded_count']}")
+    print(f"index xor: {payload['keys']['index_xor']}")
+    print(f"decoder key: {payload['keys']['decoder']}")
+    return 0
+
+
+def _extract_chip_catalog(
+    metadata: Path | None,
+    strings: Path | None,
+    output: Path | None,
+) -> int:
+    try:
+        kwargs = {}
+        if metadata is not None:
+            kwargs["metadata_path"] = metadata
+        if strings is not None:
+            kwargs["strings_path"] = strings
+        if output is not None:
+            kwargs["output"] = output
+        output_path, payload = write_chip_catalog(**kwargs)
+    except (GameMetadataError, ChipCatalogError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    summary = payload["summary"]
+    print(output_path)
+    print(f"chips: {summary['chip_count']}")
+    print(f"named chips: {summary['named_chip_count']}")
+    print(f"typed chips: {summary['typed_chip_count']}")
+    print(f"manual verified chips: {summary['manual_verified_chip_count']}")
+    print(f"pin kinds: {payload['pin_kind_values']}")
+    return 0
+
+
+def _extract_puzzle_catalog(
+    metadata: Path | None,
+    strings: Path | None,
+    chips: Path | None,
+    output: Path | None,
+) -> int:
+    try:
+        kwargs = {}
+        if metadata is not None:
+            kwargs["metadata_path"] = metadata
+        if strings is not None:
+            kwargs["strings_path"] = strings
+        if chips is not None:
+            kwargs["chips_path"] = chips
+        if output is not None:
+            kwargs["output"] = output
+        output_path, payload = write_puzzle_catalog(**kwargs)
+    except (GameMetadataError, PuzzleCatalogError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    summary = payload["summary"]
+    print(output_path)
+    print(f"puzzles: {summary['puzzle_count']}")
+    print(f"terminals: {summary['terminal_count']}")
+    print(f"provided chips: {summary['provided_chip_count']}")
+    print(f"initial traces: {summary['initial_trace_count']}")
+    print(f"decoded boards: {summary['decoded_board_count']}")
+    return 0
+
+
+def _compare_board_catalog(puzzle_id: str, catalog: Path | None) -> int:
+    try:
+        payload = load_puzzle_catalog(catalog) if catalog is not None else load_puzzle_catalog()
+        puzzle = find_puzzle(payload, puzzle_id)
+        board = board_from_id(puzzle_id)
+    except (PuzzleCatalogError, KeyError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    result = compare_board_to_puzzle(board, puzzle)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if result["status"] == "mismatch" else 0
 
 
 def _board_size(rows: list[str]) -> str | None:

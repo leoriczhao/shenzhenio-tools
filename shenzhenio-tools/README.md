@@ -23,6 +23,11 @@ Run from this directory with `PYTHONPATH=src` until the package is installed:
 
 ```powershell
 $env:PYTHONPATH='src'
+python -m shzio.cli extract-game --output .\data\raw\game-metadata.json
+python -m shzio.cli decode-game-strings
+python -m shzio.cli extract-chip-catalog
+python -m shzio.cli extract-puzzle-catalog
+python -m shzio.cli compare-board-catalog Sz035
 python -m shzio.cli check .\solutions\virtual_reality_buzzer.py
 python -m shzio.cli build .\solutions\virtual_reality_buzzer.py -o .\build\virtual-reality-buzzer-2.txt
 python -m shzio.cli analyze-txt .\build\virtual-reality-buzzer-2.txt
@@ -32,6 +37,47 @@ python -m shzio.cli scan-saves "$HOME\Documents\My Games\SHENZHEN IO\76561198123
 python -m shzio.cli scan-custom "$HOME\Documents\My Games\SHENZHEN IO\76561198123244986\workshop"
 python -m unittest discover -s tests
 ```
+
+## Game metadata extraction
+
+`extract-game` locates `Shenzhen.exe`, loads it with PowerShell reflection-only
+APIs, and writes versioned JSON containing:
+
+- the executable SHA-256 and assembly identity;
+- all managed type names;
+- detailed metadata for chip, pin, puzzle, terminal, solution, and trace types;
+- decoded IL for the `ChipTypes` and `Puzzles` initialization paths;
+- automatically discovered string-decoder candidates and embedded resources.
+
+`decode-game-strings` statically decodes the resource using the exported IL; it
+does not load or invoke the game assembly. `extract-chip-catalog` then splits
+the `ChipTypes` initializer into all 66 records and extracts type IDs, prices,
+sizes, unlocks, pin kinds, pin registers, and physical pin slots.
+
+The 66 `ChipType` records are game component definitions, not 66 programmable
+microcontrollers. They include processors, peripherals, displays, puzzle-only
+devices, and editor objects. `extract-puzzle-catalog` separately recovers all
+50 built-in puzzles, 198 terminal instances, 44 provided-chip instances, and
+the raw board tile arrays. The arrays are read from PE initialized data with
+Mono.Cecil and retained as proven three-integer cell tuples; unnamed enum
+columns are not assigned guessed meanings.
+
+`compare-board-catalog` performs a three-state comparison between extracted
+facts and a hand-written `Board`: comparable fields are `match` or `mismatch`,
+while facts that still need coordinate or tile semantics remain `unresolved`.
+
+MC4000, MC6000, and DX300 are checked against both local manuals while the
+catalog is built. Manual-only facts such as program capacity, internal
+registers, pin direction, and device-wide direction behavior are kept with
+source-page provenance. Generated API aliases remain distinguishable from
+official pin names; for example, DX300's three equivalent unnamed XBus
+contacts use stable `x0`/`x1`/`x2` aliases with `official_name: null`.
+
+The extractor does not require a .NET SDK, does not modify the executable, and
+does not execute game static constructors. If the small Mono.Cecil dependency
+is already available under `tools/.deps/`, it also reads PE initialized-data
+fields without loading game code. Raw output under `data/raw/` is local and
+ignored by Git.
 
 The `scan-custom` and `custom-info` commands are intentionally metadata-only:
 they extract `get_board()` ASCII layouts, terminal declarations, radio usage,
