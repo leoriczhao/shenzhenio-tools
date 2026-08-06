@@ -25,6 +25,7 @@ from .puzzle_catalog import (
     write_puzzle_catalog,
 )
 from .solution_file import SavedSolution
+from .simulator import CircuitSimulator
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,6 +51,19 @@ def main(argv: list[str] | None = None) -> int:
 
     p_analyze_txt = sub.add_parser("analyze-txt", help="show physical trace nets for a saved solution txt")
     p_analyze_txt.add_argument("path")
+
+    p_sim = sub.add_parser(
+        "sim", help="run the supported MCxxxx and Simple I/O simulator"
+    )
+    p_sim.add_argument("solution")
+    p_sim.add_argument("--ticks", type=int, default=1)
+    p_sim.add_argument(
+        "--input",
+        action="append",
+        default=[],
+        metavar="PORT=VALUE",
+        help="hold a Simple input or enqueue one XBus input packet",
+    )
 
     sub.add_parser("parts-info", help="dump the current part/pin database as JSON")
     sub.add_parser("boards-info", help="dump the current board database as JSON")
@@ -130,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
         return _analyze(Path(args.solution))
     if args.command == "analyze-txt":
         return _analyze_txt(Path(args.path))
+    if args.command == "sim":
+        return _sim(Path(args.solution), args.ticks, args.input)
     if args.command == "parts-info":
         return _parts_info()
     if args.command == "boards-info":
@@ -267,6 +283,67 @@ def _analyze_txt(path: Path) -> int:
         endpoints = ", ".join(endpoint.label for endpoint in net.endpoints)
         print(f"net {index}: {endpoints}")
     return 0
+
+
+def _sim(solution_path: Path, ticks: int, raw_inputs: list[str]) -> int:
+    solution = load_solution(solution_path)
+    simulator = CircuitSimulator(solution)
+    for assignment in raw_inputs:
+        name, value = _parse_input_assignment(assignment)
+        simulator.drive_input(name, value)
+
+    reports = simulator.run(ticks)
+    payload = {
+        "ticks": [
+            {
+                "tick": report.tick,
+                "rounds": report.rounds,
+                "power_used": report.power_used,
+                "blocked": list(report.blocked),
+                "sleeping": list(report.sleeping),
+                "idle": list(report.idle),
+                "deadlocked": report.deadlocked,
+                "simple_levels": report.simple_levels,
+                "xbus_transfers": [
+                    {
+                        "network": transfer.network_name,
+                        "transmitter": transfer.transmitter,
+                        "receiver": transfer.receiver,
+                        "value": transfer.value,
+                    }
+                    for transfer in report.xbus_transfers
+                ],
+            }
+            for report in reports
+        ],
+        "machines": {
+            machine.part.name: {
+                "pc": machine.pc,
+                "registers": dict(machine.registers),
+                "power_used": machine.power_used,
+                "instructions_executed": machine.instructions_executed,
+            }
+            for machine in simulator.machines
+        },
+        "time": simulator.time,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _parse_input_assignment(assignment: str) -> tuple[str, int]:
+    name, separator, raw_value = assignment.partition("=")
+    if not separator or not name or not raw_value:
+        raise ValueError(
+            f"invalid input assignment {assignment!r}; expected PORT=VALUE"
+        )
+    try:
+        value = int(raw_value, 10)
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid input value {raw_value!r} for port {name!r}"
+        ) from exc
+    return name, value
 
 
 def _parts_info() -> int:

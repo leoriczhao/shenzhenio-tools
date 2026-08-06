@@ -1,13 +1,23 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from .api import Solution
+from .geometry import (
+    footprint_cells,
+    footprint_size,
+    part_overlap_allowed,
+    port_overlap_allowed,
+    trace_blocked_cells,
+)
 from .model import Part, PinKind
 from .physical import DIRS, analyze_physical_nets, find_net_for_pin
-
-PIN_TOKEN_RE = re.compile(r"\b([px][0-3])\b")
+from .program import (
+    ProgramError,
+    RegisterOperand,
+    parse_program,
+    validate_program_for_part,
+)
 
 
 @dataclass
@@ -32,6 +42,14 @@ def check_solution(solution: Solution) -> list[Diagnostic]:
 def _check_nets(solution: Solution) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     for net in solution.nets:
+        if net.a.owner is net.b.owner:
+            diagnostics.append(
+                Diagnostic(
+                    "error",
+                    f"net {net.name or ''} connects {net.a.owner.name} to itself "
+                    f"through {net.a.name} and {net.b.name}",
+                )
+            )
         if net.a.kind != net.b.kind:
             diagnostics.append(
                 Diagnostic(
@@ -61,7 +79,7 @@ def _check_parts(solution: Solution) -> list[Diagnostic]:
             diagnostics.append(Diagnostic("error", f"part {part.name} has no placement"))
             continue
         if not solution.board.contains_footprint(
-            (part.x, part.y), (part.spec.width, part.spec.height)
+            (part.x, part.y), footprint_size(part)
         ):
             diagnostics.append(
                 Diagnostic(
@@ -70,9 +88,7 @@ def _check_parts(solution: Solution) -> list[Diagnostic]:
                     f"placement range ({min_x}, {min_y})..({max_x}, {max_y})",
                 )
             )
-        for dx in range(part.spec.width):
-            for dy in range(part.spec.height):
-                pos = (part.x + dx, part.y + dy)
+        for pos in footprint_cells(part):
                 if pos in occupied and not _bridge_terminal_overlap_allowed(
                     part, occupied[pos]
                 ):
@@ -92,21 +108,11 @@ def _check_parts(solution: Solution) -> list[Diagnostic]:
 
 
 def _bridge_terminal_overlap_allowed(a: Part, b: Part) -> bool:
-    bridge, terminal = (a, b) if a.spec.chip_kind_value == 2 else (b, a)
-    if bridge.spec.chip_kind_value != 2 or terminal.spec.chip_kind_value != 1:
-        return False
-    if bridge.x is None or bridge.y is None or terminal.x is None or terminal.y is None:
-        return False
-    return (terminal.x, terminal.y) == (bridge.x, bridge.y + 1)
+    return part_overlap_allowed(a, b)
 
 
 def _bridge_port_overlap_allowed(part: Part, position: tuple[int, int]) -> bool:
-    return (
-        part.spec.chip_kind_value == 2
-        and part.x is not None
-        and part.y is not None
-        and position == (part.x, part.y + 1)
-    )
+    return port_overlap_allowed(part, position)
 
 
 def _check_programs(solution: Solution) -> list[Diagnostic]:
@@ -115,23 +121,30 @@ def _check_programs(solution: Solution) -> list[Diagnostic]:
     connected.update((id(net.b.owner), net.b.name) for net in solution.nets)
 
     for part in solution.parts:
-        max_lines = part.spec.max_code_lines
-        instruction_lines = _instruction_lines(part.code_lines)
-        if max_lines is not None and len(instruction_lines) > max_lines:
+        try:
+            program = part.program_ir or parse_program(part.code_lines)
+            validate_program_for_part(program, part)
+        except ProgramError as exc:
             diagnostics.append(
-                Diagnostic("error", f"{part.name} has {len(instruction_lines)} instruction lines; {part.type_name} limit is {max_lines}")
+                Diagnostic("error", f"{part.name} program: {exc}")
             )
-        for line in instruction_lines:
-            for pin_name in PIN_TOKEN_RE.findall(line):
-                if pin_name not in part.spec.pins:
-                    diagnostics.append(Diagnostic("error", f"{part.name} references missing pin {pin_name}"))
-                    continue
-                if (id(part), pin_name) not in connected:
-                    diagnostics.append(Diagnostic("warning", f"{part.name}.{pin_name} is referenced but not connected in API netlist"))
-                if pin_name.startswith("p") and part.spec.pins[pin_name].kind != PinKind.SIMPLE:
-                    diagnostics.append(Diagnostic("error", f"{part.name}.{pin_name} is not a simple pin"))
-                if pin_name.startswith("x") and part.spec.pins[pin_name].kind != PinKind.XBUS:
-                    diagnostics.append(Diagnostic("error", f"{part.name}.{pin_name} is not an XBus pin"))
+            continue
+
+        referenced_pins = {
+            operand.name
+            for instruction in program.instructions
+            for operand in instruction.operands
+            if isinstance(operand, RegisterOperand)
+            and operand.name in part.spec.pins
+        }
+        for pin_name in sorted(referenced_pins):
+            if (id(part), pin_name) not in connected:
+                diagnostics.append(
+                    Diagnostic(
+                        "warning",
+                        f"{part.name}.{pin_name} is referenced but not connected in API netlist",
+                    )
+                )
     return diagnostics
 
 
@@ -141,8 +154,15 @@ def _check_traces(solution: Solution) -> list[Diagnostic]:
         return [Diagnostic("error", "board has no trace grid")]
 
     diagnostics: list[Diagnostic] = []
+    blocked_by_parts = trace_blocked_cells(
+        [*solution.parts, *solution.board.fixed_parts]
+    )
     reported_edges: set[tuple[tuple[int, int], int]] = set()
     for (x, y), mask in grid.nonempty_cells().items():
+        if (x, y) in blocked_by_parts:
+            diagnostics.append(
+                Diagnostic("error", f"trace at ({x}, {y}) passes through a part footprint")
+            )
         if solution.board.routable_cells and (x, y) not in solution.board.routable_cells:
             diagnostics.append(
                 Diagnostic("error", f"trace at ({x}, {y}) is outside the routable board area")
@@ -197,15 +217,3 @@ def _check_physical_nets(solution: Solution) -> list[Diagnostic]:
             endpoints = ", ".join(endpoint.label for endpoint in physical_net.endpoints)
             diagnostics.append(Diagnostic("error", f"physical trace mixes pin kinds: {endpoints}"))
     return diagnostics
-
-
-def _instruction_lines(lines: list[str]) -> list[str]:
-    out: list[str] = []
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.endswith(":"):
-            continue
-        out.append(line)
-    return out

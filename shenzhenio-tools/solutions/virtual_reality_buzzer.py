@@ -10,7 +10,7 @@ class VirtualRealityBuzzer(Solution):
         radio = self.board.radio
         buzzer = self.board.buzzer
 
-        cpu = self.place(MC6000("cpu"), at=(11, 5))
+        cpu = self.place(MC6000("cpu"))
         self.connect(radio.rx, cpu.x0, name="radio_to_cpu")
         self.connect(cpu.p1, buzzer.input, name="cpu_to_buzzer")
 

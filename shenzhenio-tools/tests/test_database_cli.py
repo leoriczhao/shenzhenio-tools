@@ -68,6 +68,37 @@ class DatabaseCliTests(unittest.TestCase):
         self.assertEqual(payload[0]["provided_parts"][0]["type"], "RADIO")
         self.assertEqual(payload[0]["provided_parts"][0]["position"], [7, 5])
 
+    def test_sim_uses_nonblocking_xbus_empty_value(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        payload = run_cli(
+            "sim",
+            str(root / "solutions" / "virtual_reality_buzzer.py"),
+            "--ticks",
+            "1",
+        )
+
+        self.assertEqual(1, payload["time"])
+        self.assertFalse(payload["ticks"][0]["deadlocked"])
+        self.assertEqual([], payload["ticks"][0]["blocked"])
+        self.assertEqual(-999, payload["ticks"][0]["xbus_transfers"][0]["value"])
+        self.assertEqual(6, payload["machines"]["cpu"]["power_used"])
+
+    def test_sim_accepts_bound_xbus_terminal_input(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        payload = run_cli(
+            "sim",
+            str(root / "solutions" / "virtual_reality_buzzer.py"),
+            "--ticks",
+            "1",
+            "--input",
+            "radio-rx=1",
+        )
+
+        self.assertEqual(1, payload["ticks"][0]["xbus_transfers"][0]["value"])
+        self.assertEqual({"acc": 100, "dat": 1}, payload["machines"]["cpu"]["registers"])
+        self.assertEqual({"simple-0": 100}, payload["ticks"][0]["simple_levels"])
+        self.assertEqual(7, payload["machines"]["cpu"]["power_used"])
+
 
 if __name__ == "__main__":
     unittest.main()

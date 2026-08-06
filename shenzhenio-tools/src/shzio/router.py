@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
-from itertools import islice, permutations
+from heapq import heappop, heappush
+from itertools import count, islice, permutations
 from typing import Iterable
 
 from .boards import Board
+from .geometry import trace_blocked_cells
 from .model import Net, Part, PinRef
 from .physical import (
     bridge_origins,
@@ -38,6 +40,8 @@ class RoutedNet:
 class RoutingResult:
     traces: TraceGrid
     nets: tuple[RoutedNet, ...]
+    strategy: str = "ordered"
+    iterations: int = 0
 
 
 @dataclass
@@ -47,11 +51,24 @@ class _LogicalNet:
     route_hints: tuple[tuple[int, int], ...]
 
 
+@dataclass(frozen=True)
+class _NegotiatedRoute:
+    cells: frozenset[tuple[int, int]]
+    edges: frozenset[tuple[tuple[int, int], tuple[int, int]]]
+
+
 class DeterministicRouter:
-    def __init__(self, max_order_attempts: int = 720) -> None:
+    def __init__(
+        self,
+        max_order_attempts: int = 720,
+        max_negotiation_iterations: int = 64,
+    ) -> None:
         if max_order_attempts < 1:
             raise ValueError("max_order_attempts must be positive")
+        if max_negotiation_iterations < 1:
+            raise ValueError("max_negotiation_iterations must be positive")
         self.max_order_attempts = max_order_attempts
+        self.max_negotiation_iterations = max_negotiation_iterations
 
     def route(self, board: Board, parts: list[Part], nets: list[Net]) -> RoutingResult:
         if not nets:
@@ -66,6 +83,7 @@ class DeterministicRouter:
 
         logical_nets = _logical_nets(nets)
         bridge_edges = _bridge_edges(bridge_origins(board, parts))
+        footprint_obstacles = trace_blocked_cells([*parts, *board.fixed_parts])
         initial_masks = (
             board.traces.nonempty_cells() if board.traces is not None else {}
         )
@@ -75,6 +93,11 @@ class DeterministicRouter:
             initial_masks,
             bridge_edges,
         )
+        initial_under_parts = set(initial_masks) & footprint_obstacles
+        if initial_under_parts:
+            raise RoutingError(
+                f"initial traces pass through part footprints: {sorted(initial_under_parts)}"
+            )
         contacts = {
             (endpoint.x, endpoint.y)
             for endpoint in endpoints_for_design(board, parts)
@@ -89,14 +112,27 @@ class DeterministicRouter:
                     initial_masks,
                     initial_components,
                     bridge_edges,
+                    footprint_obstacles,
                 )
             except RoutingError as exc:
                 last_error = exc
         assert last_error is not None
-        raise RoutingError(
-            f"could not route {len(logical_nets)} logical nets on {board.puzzle_id}: "
-            f"{last_error}"
-        ) from last_error
+        try:
+            return self._route_negotiated(
+                board,
+                tuple(logical_nets),
+                contacts,
+                initial_masks,
+                initial_components,
+                bridge_edges,
+                footprint_obstacles,
+            )
+        except RoutingError as negotiated_error:
+            raise RoutingError(
+                f"could not route {len(logical_nets)} logical nets on "
+                f"{board.puzzle_id}; ordered search: {last_error}; "
+                f"negotiated search: {negotiated_error}"
+            ) from negotiated_error
 
     def _route_in_order(
         self,
@@ -106,29 +142,15 @@ class DeterministicRouter:
         initial_masks: dict[tuple[int, int], int],
         initial_components: dict[int | None, tuple[frozenset[tuple[int, int]], ...]],
         bridge_edges: dict[tuple[int, int], tuple[int, int]],
+        footprint_obstacles: frozenset[tuple[int, int]],
     ) -> RoutingResult:
         masks = initial_masks.copy()
         occupied = set(initial_masks)
         routed: dict[int, RoutedNet] = {}
 
         for logical_net in logical_nets:
-            endpoint_cells = tuple(_pin_coordinate(pin) for pin in logical_net.pins)
+            endpoint_cells = _validate_logical_net(board, logical_net, contacts)
             unique_endpoints = tuple(dict.fromkeys(endpoint_cells))
-            for cell in unique_endpoints:
-                if cell not in board.routable_cells:
-                    raise RoutingError(
-                        f"endpoint {_pin_labels(logical_net.pins)} at {cell} is not routable"
-                    )
-            for hint in logical_net.route_hints:
-                if hint not in board.routable_cells:
-                    raise RoutingError(
-                        f"route hint {hint} for {_pin_labels(logical_net.pins)} is not routable"
-                    )
-                if hint in contacts and hint not in unique_endpoints:
-                    raise RoutingError(
-                        f"route hint {hint} for {_pin_labels(logical_net.pins)} "
-                        "is an unrelated pin contact"
-                    )
 
             seed_components = initial_components.get(logical_net.source_index, ())
             own_seed_cells = set().union(*seed_components) if seed_components else set()
@@ -156,6 +178,7 @@ class DeterministicRouter:
                     targets=tree,
                     allowed=board.routable_cells,
                     blocked=occupied | blocked_contacts,
+                    footprint_obstacles=footprint_obstacles,
                     bridge_edges=bridge_edges,
                 )
                 for a, b in zip(path, path[1:]):
@@ -181,9 +204,257 @@ class DeterministicRouter:
             nets=tuple(routed[index] for index in sorted(routed)),
         )
 
+    def _route_negotiated(
+        self,
+        board: Board,
+        logical_nets: tuple[_LogicalNet, ...],
+        contacts: set[tuple[int, int]],
+        initial_masks: dict[tuple[int, int], int],
+        initial_components: dict[
+            int | None, tuple[frozenset[tuple[int, int]], ...]
+        ],
+        bridge_edges: dict[tuple[int, int], tuple[int, int]],
+        footprint_obstacles: frozenset[tuple[int, int]],
+    ) -> RoutingResult:
+        routes: dict[int, _NegotiatedRoute] = {}
+        usage: Counter[tuple[int, int]] = Counter()
+        history: Counter[tuple[int, int]] = Counter()
+        base_order = tuple(logical_nets)
+
+        for iteration in range(1, self.max_negotiation_iterations + 1):
+            shift = (iteration - 1) % len(base_order)
+            order = base_order[shift:] + base_order[:shift]
+            present_penalty = 1 + (iteration - 1) * 4
+
+            for logical_net in order:
+                previous = routes.pop(logical_net.source_index, None)
+                if previous is not None:
+                    _update_usage(usage, previous.cells, -1)
+                route = _route_weighted_net(
+                    board=board,
+                    logical_net=logical_net,
+                    contacts=contacts,
+                    initial_masks=initial_masks,
+                    initial_components=initial_components,
+                    bridge_edges=bridge_edges,
+                    footprint_obstacles=footprint_obstacles,
+                    usage=usage,
+                    history=history,
+                    present_penalty=present_penalty,
+                )
+                routes[logical_net.source_index] = route
+                _update_usage(usage, route.cells, 1)
+
+            congested = {
+                cell: used for cell, used in usage.items() if used > 1
+            }
+            if not congested:
+                return _build_negotiated_result(
+                    board,
+                    logical_nets,
+                    routes,
+                    initial_masks,
+                    bridge_edges,
+                    iteration,
+                )
+            for cell, used in congested.items():
+                history[cell] += (used - 1) * 4
+
+        worst = sorted(
+            ((used, cell) for cell, used in usage.items() if used > 1),
+            reverse=True,
+        )[:8]
+        raise RoutingError(
+            f"congestion remained after {self.max_negotiation_iterations} "
+            f"iterations at {worst}"
+        )
+
 
 def route_nets(board: Board, parts: list[Part], nets: list[Net]) -> RoutingResult:
     return DeterministicRouter().route(board, parts, nets)
+
+
+def _route_weighted_net(
+    *,
+    board: Board,
+    logical_net: _LogicalNet,
+    contacts: set[tuple[int, int]],
+    initial_masks: dict[tuple[int, int], int],
+    initial_components: dict[
+        int | None, tuple[frozenset[tuple[int, int]], ...]
+    ],
+    bridge_edges: dict[tuple[int, int], tuple[int, int]],
+    footprint_obstacles: frozenset[tuple[int, int]],
+    usage: Counter[tuple[int, int]],
+    history: Counter[tuple[int, int]],
+    present_penalty: int,
+) -> _NegotiatedRoute:
+    endpoint_cells = _validate_logical_net(board, logical_net, contacts)
+    unique_endpoints = tuple(dict.fromkeys(endpoint_cells))
+    seed_components = initial_components.get(logical_net.source_index, ())
+    own_seed_cells = set().union(*seed_components) if seed_components else set()
+    hard_blocked = (
+        footprint_obstacles
+        | (contacts - set(unique_endpoints))
+        | (set(initial_masks) - own_seed_cells)
+    )
+
+    if seed_components:
+        tree = set(seed_components[0])
+        pending = [min(component) for component in seed_components[1:]]
+        pending.extend(logical_net.route_hints)
+        pending.extend(
+            endpoint for endpoint in unique_endpoints if endpoint not in tree
+        )
+    else:
+        tree = {unique_endpoints[0]}
+        pending = [*logical_net.route_hints, *unique_endpoints[1:]]
+    pending = list(dict.fromkeys(cell for cell in pending if cell not in tree))
+    edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+
+    for endpoint in pending:
+        component = next(
+            (item for item in seed_components if endpoint in item),
+            frozenset({endpoint}),
+        )
+        path = _weighted_path(
+            start=endpoint,
+            targets=tree,
+            allowed=board.routable_cells,
+            hard_blocked=hard_blocked,
+            bridge_edges=bridge_edges,
+            usage=usage,
+            history=history,
+            present_penalty=present_penalty,
+        )
+        edges.update(zip(path, path[1:]))
+        tree.update(path)
+        tree.update(component)
+
+    return _NegotiatedRoute(frozenset(tree), frozenset(edges))
+
+
+def _validate_logical_net(
+    board: Board,
+    logical_net: _LogicalNet,
+    contacts: set[tuple[int, int]],
+) -> tuple[tuple[int, int], ...]:
+    endpoints = tuple(_pin_coordinate(pin) for pin in logical_net.pins)
+    unique_endpoints = set(endpoints)
+    for cell in endpoints:
+        if cell not in board.routable_cells:
+            raise RoutingError(
+                f"endpoint {_pin_labels(logical_net.pins)} at {cell} is not routable"
+            )
+    for hint in logical_net.route_hints:
+        if hint not in board.routable_cells:
+            raise RoutingError(
+                f"route hint {hint} for {_pin_labels(logical_net.pins)} "
+                "is not routable"
+            )
+        if hint in contacts and hint not in unique_endpoints:
+            raise RoutingError(
+                f"route hint {hint} for {_pin_labels(logical_net.pins)} "
+                "is an unrelated pin contact"
+            )
+    return endpoints
+
+
+def _weighted_path(
+    *,
+    start: tuple[int, int],
+    targets: set[tuple[int, int]],
+    allowed: frozenset[tuple[int, int]],
+    hard_blocked: frozenset[tuple[int, int]] | set[tuple[int, int]],
+    bridge_edges: dict[tuple[int, int], tuple[int, int]],
+    usage: Counter[tuple[int, int]],
+    history: Counter[tuple[int, int]],
+    present_penalty: int,
+) -> list[tuple[int, int]]:
+    if start in targets:
+        return [start]
+    sequence = count()
+    distances = {start: 0}
+    parent: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+    queue: list[tuple[int, int, int, tuple[int, int]]] = [
+        (0, 0, next(sequence), start)
+    ]
+
+    while queue:
+        cost, hops, _, current = heappop(queue)
+        if cost != distances.get(current):
+            continue
+        if current in targets:
+            return _reconstruct_path(parent, current)
+        for neighbor in _route_neighbors(current, bridge_edges):
+            if neighbor not in allowed or neighbor in hard_blocked:
+                continue
+            step_cost = (
+                1
+                + usage.get(neighbor, 0) * present_penalty
+                + history.get(neighbor, 0)
+            )
+            candidate_cost = cost + step_cost
+            if candidate_cost >= distances.get(neighbor, 1 << 60):
+                continue
+            distances[neighbor] = candidate_cost
+            parent[neighbor] = current
+            heappush(
+                queue,
+                (candidate_cost, hops + 1, next(sequence), neighbor),
+            )
+
+    raise RoutingError(
+        f"no legal negotiated path from {start} to the existing net tree"
+    )
+
+
+def _route_neighbors(
+    cell: tuple[int, int],
+    bridge_edges: dict[tuple[int, int], tuple[int, int]],
+) -> Iterable[tuple[int, int]]:
+    x, y = cell
+    for dx, dy, _, _ in CARDINAL_STEPS:
+        yield x + dx, y + dy
+    bridge_neighbor = bridge_edges.get(cell)
+    if bridge_neighbor is not None:
+        yield bridge_neighbor
+
+
+def _update_usage(
+    usage: Counter[tuple[int, int]],
+    cells: Iterable[tuple[int, int]],
+    delta: int,
+) -> None:
+    for cell in cells:
+        usage[cell] += delta
+        if usage[cell] == 0:
+            del usage[cell]
+
+
+def _build_negotiated_result(
+    board: Board,
+    logical_nets: tuple[_LogicalNet, ...],
+    routes: dict[int, _NegotiatedRoute],
+    initial_masks: dict[tuple[int, int], int],
+    bridge_edges: dict[tuple[int, int], tuple[int, int]],
+    iterations: int,
+) -> RoutingResult:
+    masks = initial_masks.copy()
+    routed = []
+    for logical_net in sorted(logical_nets, key=lambda item: item.source_index):
+        route = routes[logical_net.source_index]
+        for cell in route.cells:
+            masks[cell] = masks.get(cell, 0) | EXISTS
+        for a, b in route.edges:
+            _connect_masks(masks, a, b, bridge_edges)
+        routed.append(RoutedNet(tuple(logical_net.pins), route.cells))
+    return RoutingResult(
+        traces=TraceGrid.from_masks(board.width, board.height, masks),
+        nets=tuple(routed),
+        strategy="negotiated",
+        iterations=iterations,
+    )
 
 
 def _logical_nets(nets: list[Net]) -> list[_LogicalNet]:
@@ -337,6 +608,7 @@ def _lee_path(
     targets: set[tuple[int, int]],
     allowed: frozenset[tuple[int, int]],
     blocked: set[tuple[int, int]],
+    footprint_obstacles: frozenset[tuple[int, int]],
     bridge_edges: dict[tuple[int, int], tuple[int, int]],
 ) -> list[tuple[int, int]]:
     if start in targets:
@@ -351,7 +623,10 @@ def _lee_path(
             neighbor = cx + dx, cy + dy
             if neighbor in parent or neighbor not in allowed:
                 continue
-            if neighbor in blocked and neighbor not in targets:
+            if (
+                neighbor in footprint_obstacles
+                or (neighbor in blocked and neighbor not in targets)
+            ):
                 continue
             parent[neighbor] = current
             if neighbor in targets:
@@ -362,6 +637,7 @@ def _lee_path(
             bridge_neighbor is not None
             and bridge_neighbor not in parent
             and bridge_neighbor in allowed
+            and bridge_neighbor not in footprint_obstacles
             and (bridge_neighbor not in blocked or bridge_neighbor in targets)
         ):
             parent[bridge_neighbor] = current

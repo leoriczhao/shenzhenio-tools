@@ -11,12 +11,19 @@ Current scope:
 - Model trace grids with the game's `Exists` and directional bit masks.
 - Model parts, pins, boards, and typed nets.
 - Build solutions through a Python API.
+- Place unpositioned parts with deterministic route-aware search.
 - Route typed nets deterministically on extracted board geometry.
-- Run basic static checks before writing files back to the game save directory.
+- Parse MCxxxx code into typed `ProgramIR` and run chip-specific static checks.
+- Execute MCxxxx instructions in a deterministic single-chip VM core.
+- Simulate multiple MCxxxx chips over logical Simple I/O networks per tick.
+- Synchronize active/passive XBus readers and writers with one-packet rendezvous.
+- Run static checks before writing files back to the game save directory.
 - Analyze physical trace nets from generated or existing save files.
 - Extract board and terminal metadata from custom specification Lua files.
 
-This is not a full simulator yet.
+This is not a full circuit simulator yet. The MCxxxx scheduler, logical Simple
+I/O, and baseline XBus rendezvous exist, but peripheral device models and
+game-differential timing confirmation are still in progress.
 
 ## Commands
 
@@ -33,6 +40,7 @@ python -m shzio.cli compare-board-catalog Sz035
 python -m shzio.cli check .\solutions\virtual_reality_buzzer.py
 python -m shzio.cli build .\solutions\virtual_reality_buzzer.py -o .\build\virtual-reality-buzzer-2.txt
 python -m shzio.cli analyze-txt .\build\virtual-reality-buzzer-2.txt
+python -m shzio.cli sim .\solutions\virtual_reality_buzzer.py --ticks 1
 python -m shzio.cli parts-info
 python -m shzio.cli boards-info
 python -m shzio.cli scan-saves "$HOME\Documents\My Games\SHENZHEN IO\76561198123244986"
@@ -92,8 +100,29 @@ and user-supplied route hints.
 the game's special `(x, y) <-> (x, y + 2)` electrical edge without occupying
 the middle trace cell, allowing a vertical net to cross a horizontal net. The
 checker permits a bridge's middle footprint cell to overlap a board terminal,
-matching the editor's sole component-overlap exception. Negotiated congestion
-and placement search are still pending.
+matching the editor's sole component-overlap exception.
+
+`place(part)` leaves a part for automatic placement; `place(part, at=(x, y))`
+keeps it fixed. `allow_rotate=True` lets the placer evaluate both package
+orientations. Complete candidates are evaluated with the real trace router and
+ranked by routed cells, bends, and layout span. `placement_max_states` and
+`placement_timeout_seconds` bound the search while preserving the best
+routable result found so far. The router, placer, and checker share package
+footprint obstacles, including the bridge crossing exception. Negotiated
+congestion runs as a deterministic rip-up/reroute fallback after ordered Lee
+routing: shared cells gain present and historical penalties until every net is
+disjoint or the configured iteration limit is reached. `RoutingResult.strategy`
+and `RoutingResult.iterations` expose which path produced the result.
+
+```python
+class VirtualRealityBuzzer(Solution):
+    board = "Sz035"
+
+    def build(self) -> None:
+        cpu = self.place(MC6000("cpu"))  # no coordinate required
+        self.connect(self.board.radio.rx, cpu.x0)
+        self.connect(cpu.p1, self.board.buzzer.input)
+```
 
 The normalized catalogs are also executable runtime data. `part_from_type()`
 can construct any of the 66 extracted component packages as a `Part`, while
@@ -115,6 +144,70 @@ registers, pin direction, and device-wide direction behavior are kept with
 source-page provenance. Generated API aliases remain distinguishable from
 official pin names; for example, DX300's three equivalent unnamed XBus
 contacts use stable `x0`/`x1`/`x2` aliases with `official_name: null`.
+
+## Program IR and VM core
+
+`ProgramBuilder` now creates typed instructions, operands, labels, and
+conditional prefixes while rendering the same solution text as the original
+Python API. Raw code can be parsed with `parse_program()`. The checker uses the
+same IR to reject malformed code, missing labels, unsupported registers,
+model-specific line-count overflow, and invalid `slx`/`gen` pin kinds.
+
+```python
+from shzio import MC6000, MicrocontrollerVM, parse_program
+
+cpu = MC6000("cpu")
+program = parse_program(["mov 800 acc", "add 400", "slp 1"])
+vm = MicrocontrollerVM(cpu, program)
+vm.run_until_blocked()
+assert vm.read_register("acc") == 999
+```
+
+The VM implements register/null semantics, saturating arithmetic, tests and
+conditional power accounting, labels and jumps, digit operations, blocking
+pin accesses, and local `slp`/`gen` temporal state. `MemoryPinIO` is only a
+deterministic probe adapter; it is not the final XBus network. Source confidence
+and the remaining game-differential work are recorded in
+[`docs/simulator-semantics.md`](docs/simulator-semantics.md).
+
+`CircuitSimulator` groups connected Simple endpoints from the solution IR and
+runs every programmable part in deterministic round-robin instruction rounds.
+Writing a Simple pin switches it to output mode; reading switches it back to
+input and clears its previous output, as specified by the MC4000/MC6000 data
+sheets. `TickReport` records power, blocked/sleeping/idle machines, network
+levels, and deadlock state before advancing `slp`/`gen` by one time unit.
+
+```python
+simulator = CircuitSimulator(solution)
+simulator.drive_port("sensor", 73)
+report = simulator.tick()
+actual = simulator.read_port("actuator")
+```
+
+The CLI accepts constant Simple inputs and emits JSON state. Dynamic input
+events and waveform assertions belong to the later testbench layer.
+
+```powershell
+python -m shzio.cli sim .\solutions\example.py --ticks 10 --input sensor=73
+```
+
+XBus is modeled as a rendezvous rather than a queue: an active MCU read and
+write complete only after a matching endpoint waits on the same logical
+network. External puzzle terminals are passive; non-blocking outputs yield
+`-999` when no packet is queued. `slx` observes a waiting value without
+consuming it. One packet transfers per network per instruction round, and
+`TickReport.xbus_transfers` records the selected endpoints and value.
+
+`--input` drives a constant Simple level for Simple terminals and enqueues one
+packet for XBus terminals, including terminal names bound to provided parts:
+
+```powershell
+python -m shzio.cli sim .\solutions\virtual_reality_buzzer.py --ticks 1 --input radio-rx=1
+```
+
+Multiple simultaneous XBus candidates currently use stable endpoint order.
+The game may use seeded random arbitration, so that tie-break rule remains
+provisional and is called out in the simulator evidence document.
 
 The extractor does not require a .NET SDK, does not modify the executable, and
 does not execute game static constructors. If the small Mono.Cecil dependency

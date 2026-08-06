@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .program import Program
 
 
 class PinKind(str, Enum):
@@ -91,6 +94,7 @@ class Part(Connectable):
     rotated: bool = False
     provided: bool = False
     code_lines: list[str] = field(default_factory=list)
+    program_ir: "Program | None" = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.name is None:
@@ -160,6 +164,11 @@ class Part(Connectable):
 
     def set_code(self, lines: Iterable[str]) -> None:
         self.code_lines = list(lines)
+        self.program_ir = None
+
+    def set_program(self, program: "Program") -> None:
+        self.program_ir = program
+        self.code_lines = program.render_lines()
 
 
 @dataclass

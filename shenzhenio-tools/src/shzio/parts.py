@@ -110,6 +110,16 @@ PART_SPECS = {
 
 _CATALOG_PART_SPECS: dict[str, PartSpec] | None = None
 
+# The manual describes MC4000X as the XBus-only MC4000 variant but does not
+# repeat its program-memory/register table. Keep that inference explicit rather
+# than silently treating the extracted package as a non-programmable device.
+INFERRED_PROGRAMMABLE_BEHAVIOR = {
+    "UC4X": {
+        "max_code_lines": 9,
+        "registers": ("acc",),
+    },
+}
+
 
 class MC4000(Part):
     def __init__(self, name: str | None = None) -> None:
@@ -119,6 +129,11 @@ class MC4000(Part):
 class MC6000(Part):
     def __init__(self, name: str | None = None) -> None:
         super().__init__(MC6000_SPEC, name=name)
+
+
+class MC4000X(Part):
+    def __init__(self, name: str | None = None) -> None:
+        super().__init__(part_spec_for_type("UC4X"), name=name)
 
 
 class Radio(Part):
@@ -224,6 +239,7 @@ def part_spec_from_catalog_record(record: dict[str, Any]) -> PartSpec:
         pins[pin.name] = pin
 
     manual = record.get("manual") or {}
+    inferred_behavior = INFERRED_PROGRAMMABLE_BEHAVIOR.get(type_name, {})
     chip_kind_value = next(
         (
             field.get("value")
@@ -237,8 +253,14 @@ def part_spec_from_catalog_record(record: dict[str, Any]) -> PartSpec:
         width=size[0],
         height=size[1],
         cost=record.get("price", 0),
-        max_code_lines=manual.get("program_lines"),
-        registers=tuple(manual.get("internal_registers", [])),
+        max_code_lines=manual.get(
+            "program_lines", inferred_behavior.get("max_code_lines")
+        ),
+        registers=tuple(
+            manual.get(
+                "internal_registers", inferred_behavior.get("registers", ())
+            )
+        ),
         pins=pins,
         chip_kind_value=chip_kind_value,
     )
