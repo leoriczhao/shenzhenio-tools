@@ -14,10 +14,10 @@ dist/
 *.egg-info/
 
 # Generated solutions and local extraction caches
-/shenzhenio-tools/build/
-/shenzhenio-tools/data/raw/
-/shenzhenio-tools/.cache/
-/shenzhenio-tools/tools/.deps/
+/build/
+/data/raw/
+/.cache/
+/tools/.deps/
 
 # Temporary and backup files
 *.tmp
